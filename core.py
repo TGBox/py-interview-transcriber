@@ -39,6 +39,95 @@ def assign_speakers(segments: list[Segment], turns: list[Turn]) -> list[dict]:
     return out
 
 
+TERMINAL_PUNCT = re.compile(r'[.?!][\"\'»”’“\)]?\s*$')
+
+
+def split_first_sentence(text: str) -> tuple[str, str]:
+    """Splits text into (first_sentence, remainder)."""
+    text = text.strip()
+    m = re.match(r'^\s*([^.?!]+[.?!]+[\"\'»”’“\)]?)(?:\s+(.*))?$', text, re.DOTALL)
+    if m:
+        return m.group(1).strip(), (m.group(2) or "").strip()
+    return text, ""
+
+
+def split_last_sentence(text: str) -> tuple[str, str]:
+    """Splits text into (remainder_before_last_sentence, last_sentence)."""
+    text = text.strip()
+    m = re.match(r'^(.*[.?!]+[\"\'»”’“\)]?)\s+([^.?!]+[.?!]+[\"\'»”’“\)]?)$', text, re.DOTALL)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    m2 = re.match(r'^(.*[.?!]+[\"\'»”’“\)]?)\s+([^.?!]+)$', text, re.DOTALL)
+    if m2:
+        return m2.group(1).strip(), m2.group(2).strip()
+    return "", text
+
+
+def split_trailing_fragment(text: str, max_words: int = 4) -> tuple[str, str | None]:
+    """Checks if text ends with terminal punctuation followed by a short trailing fragment."""
+    text = text.strip()
+    m = re.match(r'^(.*[.?!]+[\"\'»”’“\)]?)\s+([^.?!]+)$', text, re.DOTALL)
+    if m:
+        trailing = m.group(2).strip()
+        if len(trailing.split()) <= max_words:
+            return m.group(1).strip(), trailing
+    return text, None
+
+
+def realign_paragraph_boundaries(paragraphs: list[dict]) -> tuple[list[dict], int]:
+    """Realigns misattributed sentence ends/beginnings at speaker boundaries."""
+    out = [dict(p) for p in paragraphs]
+    changes = 0
+    i = 0
+    while i < len(out) - 1:
+        p0 = out[i]
+        p1 = out[i + 1]
+        t0 = p0.get("text", "").strip()
+        t1 = p1.get("text", "").strip()
+
+        # Case A: p0 ends with complete sentence + trailing fragment (<= 4 words) and p1 starts lowercase
+        base0, trailing = split_trailing_fragment(t0)
+        if trailing and t1 and t1[0].islower():
+            p0["text"] = base0
+            p1["text"] = trailing + " " + t1
+            dur = p0["end"] - p0["start"]
+            frac = len(trailing) / max(len(t0), 1)
+            time_shift = dur * frac
+            p0["end"] = max(p0["start"], p0["end"] - time_shift)
+            p1["start"] = min(p1["end"], p1["start"] - time_shift)
+            p0.pop("smooth", None)
+            p1.pop("smooth", None)
+            changes += 1
+            i += 1
+            continue
+
+        # Case B: p0 does not end in terminal punct, and p1 starts with continuation fragment ending in punct
+        if not TERMINAL_PUNCT.search(t0):
+            first_sent, rest = split_first_sentence(t1)
+            if first_sent and (t1[0].islower() or len(first_sent.split()) <= 6):
+                p0["text"] = t0 + " " + first_sent
+                dur = p1["end"] - p1["start"]
+                frac = len(first_sent) / max(len(t1), 1)
+                time_shift = dur * frac
+                p0["end"] = min(p1["end"], p0["end"] + time_shift)
+                p0.pop("smooth", None)
+                p1.pop("smooth", None)
+                if rest:
+                    p1["text"] = rest
+                    p1["start"] = min(p1["end"], p1["start"] + time_shift)
+                    i += 1
+                else:
+                    # p1 completely absorbed into p0
+                    p0["end"] = p1["end"]
+                    out.pop(i + 1)
+                changes += 1
+                continue
+
+        i += 1
+
+    return out, changes
+
+
 def merge_paragraphs(items: list[dict], pause: float = PAUSE_SECONDS) -> list[dict]:
     """Aufeinanderfolgende Wörter desselben Sprechers zu Absätzen zusammenfassen, lange Pausen markieren."""
     out: list[dict] = []
@@ -49,7 +138,8 @@ def merge_paragraphs(items: list[dict], pause: float = PAUSE_SECONDS) -> list[di
             out[-1]["end"] = it["end"]
         else:
             out.append(dict(it))
-    return out
+    realigned, _ = realign_paragraph_boundaries(out)
+    return realigned
 
 
 def clean_text(text: str, keep_pauses: bool = False) -> str:

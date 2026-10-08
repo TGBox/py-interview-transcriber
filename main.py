@@ -10,12 +10,12 @@ from PySide6.QtGui import QAction, QColor, QKeySequence, QPageLayout, QPageSize,
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
     QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
 import llm
-from core import FORMS, fmt_time, render, summary_blocks, to_docx, to_html
+from core import FORMS, fmt_time, realign_paragraph_boundaries, render, split_first_sentence, split_last_sentence, summary_blocks, to_docx, to_html
 
 OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm *.json);;"
                "Alle Dateien (*)")
@@ -57,17 +57,60 @@ class Worker(QThread):
                 self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class ParagraphEditor(QPlainTextEdit):
+    split_requested = Signal(int)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self.split_requested.emit(self.textCursor().position())
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class MultilineDelegate(QStyledItemDelegate):
-    """Lange Absätze mehrzeilig bearbeiten statt in einer einzeiligen Box."""
+    """Lange Absätze mehrzeilig bearbeiten; Strg+Enter teilt den Absatz an der Cursorposition."""
+    split_at = Signal(int, int)
 
     def createEditor(self, parent, option, index):
-        return QPlainTextEdit(parent)
+        editor = ParagraphEditor(parent)
+        row = index.row()
+
+        def on_split(pos):
+            self.commitData.emit(editor)
+            self.closeEditor.emit(editor)
+            self.split_at.emit(row, pos)
+
+        editor.split_requested.connect(on_split)
+        return editor
 
     def setEditorData(self, editor, index):
-        editor.setPlainText(index.data())
+        editor.setPlainText(index.data() or "")
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.toPlainText().strip())
+
+
+class SplitDialog(QDialog):
+    """Dialog zum visuellen Teilen eines Absatzes an der gewählten Cursorposition."""
+    def __init__(self, parent, text: str):
+        super().__init__(parent)
+        self.setWindowTitle("Absatz teilen")
+        self.setMinimumSize(520, 260)
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("Cursor an die gewünschte Trennstelle setzen und <b>Hier teilen</b> klicken:<br>"
+                           "<small style='color:#666'>Tipp: Im Hauptfenster genügt Strg+Eingabe während des Editierens.</small>"))
+        self.editor = QPlainTextEdit(text)
+        v.addWidget(self.editor)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        btn_split = buttons.addButton("Hier teilen", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_split.setDefault(True)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        v.addWidget(buttons)
+
+    def split_position(self) -> int:
+        return self.editor.textCursor().position()
 
 
 class ReplaceDialog(QDialog):
@@ -95,16 +138,20 @@ class SettingsDialog(QDialog):
         form = QFormLayout(self)
 
         form.addRow(QLabel("<b>Sprechererkennung</b>"))
-        self.token = QLineEdit(settings.value("hf_token", ""), echoMode=QLineEdit.EchoMode.Password)
+        self.token = QLineEdit(settings.value("hf_token", ""))
+        self.token.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Hugging-Face-Token:", self.token)
-        form.addRow(QLabel("Konto auf huggingface.co → Bedingungen von pyannote/speaker-diarization-community-1 "
-                           "akzeptieren → Settings → Access Tokens → Read-Token erzeugen.", wordWrap=True))
+        lbl_hf = QLabel("Konto auf huggingface.co → Bedingungen von pyannote/speaker-diarization-community-1 "
+                        "akzeptieren → Settings → Access Tokens → Read-Token erzeugen.")
+        lbl_hf.setWordWrap(True)
+        form.addRow(lbl_hf)
 
         form.addRow(QLabel("<b>Sprachmodell (Ollama)</b> – für Glättung und Zusammenfassung"))
         self.url = QLineEdit(settings.value("ollama_url", llm.DEFAULT_URL))
         self.url.editingFinished.connect(self.check)
         form.addRow("Adresse:", self.url)
-        self.model = QComboBox(editable=True)
+        self.model = QComboBox()
+        self.model.setEditable(True)
         self.model.setCurrentText(settings.value("ollama_model", llm.DEFAULT_MODEL))
         self.model.activated.connect(self.check)
         refresh = QPushButton("Status prüfen")
@@ -113,10 +160,14 @@ class SettingsDialog(QDialog):
         row.addWidget(self.model, 1)
         row.addWidget(refresh)
         form.addRow("Modell:", row)
-        self.state = QLabel(wordWrap=True, textInteractionFlags=Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.state = QLabel()
+        self.state.setWordWrap(True)
+        self.state.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow("Status:", self.state)
-        form.addRow(QLabel("Neues Modell installieren: in der Eingabeaufforderung <code>ollama pull &lt;name&gt;</code>, "
-                           "dann „Status prüfen“.", wordWrap=True))
+        lbl_ollama = QLabel("Neues Modell installieren: in der Eingabeaufforderung <code>ollama pull &lt;name&gt;</code>, "
+                            "dann „Status prüfen“.")
+        lbl_ollama.setWordWrap(True)
+        form.addRow(lbl_ollama)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
@@ -165,14 +216,29 @@ class MainWindow(QMainWindow):
         self.act_replace = self._act("Suchen und Ersetzen …", self.replace_all, "Ctrl+H")
         self.act_smooth = self._act("Mit Sprachmodell glätten", self.smooth_with_llm, "Ctrl+G")
         self.act_smooth.setToolTip("Füllt die Spalte „Geglättet (Sprachmodell)“ für alle noch leeren Absätze.")
+        self.act_realign = self._act("Sprechergrenzen automatisch glätten", self.auto_realign_speakers)
+        self.act_realign.setToolTip("Glättet fehlerhafte Satzenden an Sprecherwechseln automatisch über das gesamte Transkript.")
+        self.act_first_to_prev = self._act("Ersten Satz an vorigen Absatz übergeben",
+                                           lambda: self.move_first_sentence_to_prev(self.table.currentRow()),
+                                           "Ctrl+Shift+Up")
+        self.act_last_to_next = self._act("Letzten Satz an nächsten Absatz übergeben",
+                                          lambda: self.move_last_sentence_to_next(self.table.currentRow()),
+                                          "Ctrl+Shift+Down")
+        self.act_fullscreen = self._act("Vollbildmodus", self.toggle_fullscreen, "F11")
 
         # Menü für Seltenes
         m = self.menuBar().addMenu("&Datei")
         for a in (self.act_open, self.act_save, self.act_docx, self.act_pdf):
             m.addAction(a)
-        m = self.menuBar().addMenu("&Bearbeiten")
-        m.addAction(self.act_replace)
-        m.addAction(self.act_smooth)
+        m_edit = self.menuBar().addMenu("&Bearbeiten")
+        m_edit.addAction(self.act_replace)
+        m_edit.addAction(self.act_smooth)
+        m_edit.addSeparator()
+        m_edit.addAction(self.act_realign)
+        m_edit.addAction(self.act_first_to_prev)
+        m_edit.addAction(self.act_last_to_next)
+        m_view = self.menuBar().addMenu("&Ansicht")
+        m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
 
         # Toolbar für Häufiges
@@ -182,14 +248,17 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_save)
         tb.addSeparator()
         tb.addWidget(QLabel(" Sprecher: "))
-        self.spin = QSpinBox(minimum=0, maximum=10, specialValueText="auto")
+        self.spin = QSpinBox()
+        self.spin.setRange(0, 10)
+        self.spin.setSpecialValueText("auto")
         self.spin.setValue(self.settings.value("num_speakers", 2, type=int))
         self.spin.valueChanged.connect(lambda v: self.settings.setValue("num_speakers", v))
         self.spin.setToolTip("Bekannte Sprecheranzahl verbessert die Erkennung deutlich. 0 = automatisch.")
         tb.addWidget(self.spin)
         tb.addWidget(QLabel("  Fachbegriffe: "))
-        self.hotwords = QLineEdit(self.settings.value("hotwords", ""), maximumWidth=260,
-                                  placeholderText="z. B. Namen, Produkte, Abkürzungen")
+        self.hotwords = QLineEdit(self.settings.value("hotwords", ""))
+        self.hotwords.setMaximumWidth(260)
+        self.hotwords.setPlaceholderText("z. B. Namen, Produkte, Abkürzungen")
         self.hotwords.setToolTip("Begriffe, die Whisper richtig schreiben soll (Leerzeichen-getrennt).")
         self.hotwords.editingFinished.connect(lambda: self.settings.setValue("hotwords", self.hotwords.text()))
         tb.addWidget(self.hotwords)
@@ -213,7 +282,8 @@ class MainWindow(QMainWindow):
         # Links: Titel + Sprechernamen
         left = QWidget()
         lv = QVBoxLayout(left)
-        self.title_edit = QLineEdit(placeholderText="Titel des Transkripts")
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("Titel des Transkripts")
         self.title_edit.textEdited.connect(self._mark_dirty)
         lv.addWidget(QLabel("<b>Titel</b>"))
         lv.addWidget(self.title_edit)
@@ -227,16 +297,23 @@ class MainWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["Zeit", "Sprecher", "Text (wörtlich)", "Geglättet (Sprachmodell)"])
         self.table.setWordWrap(True)
         self.table.verticalHeader().hide()
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_context_menu)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(COL_TIME, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(COL_SPEAKER, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(COL_TEXT, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(COL_SMOOTH, QHeaderView.ResizeMode.Stretch)
-        self.table.setItemDelegateForColumn(COL_TEXT, MultilineDelegate(self.table))
+        self.text_delegate = MultilineDelegate(self.table)
+        self.text_delegate.split_at.connect(self.split_paragraph_at_cursor)
+        self.table.setItemDelegateForColumn(COL_TEXT, self.text_delegate)
         self.table.setItemDelegateForColumn(COL_SMOOTH, MultilineDelegate(self.table))
         self.table.setColumnHidden(COL_SMOOTH, True)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.currentCellChanged.connect(self._seek_to_row)
+        self.table.addAction(self.act_first_to_prev)
+        self.table.addAction(self.act_last_to_next)
+        self.addAction(self.act_fullscreen)
 
         split = QSplitter()
         split.addWidget(left)
@@ -245,10 +322,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(split)
 
         self.status = QLabel("Audiodatei oder Projekt öffnen, um zu starten.")
-        self.bar = QProgressBar(maximumWidth=300, visible=False)
+        self.bar = QProgressBar()
+        self.bar.setMaximumWidth(300)
+        self.bar.setVisible(False)
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.bar)
-        self.llm_button = QToolButton(autoRaise=True)
+        self.llm_button = QToolButton()
+        self.llm_button.setAutoRaise(True)
         self.llm_button.clicked.connect(self.open_settings)
         self.statusBar().addPermanentWidget(self.llm_button)
         self._save_after = False
@@ -350,7 +430,8 @@ class MainWindow(QMainWindow):
         if not busy and self.worker and self.worker.cancel_requested:
             self.status.setText("Abgebrochen.")
         has_rows = self.table.rowCount() > 0
-        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace, self.act_smooth):
+        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace, self.act_smooth,
+                  self.act_realign, self.act_first_to_prev, self.act_last_to_next):
             a.setEnabled(not busy and has_rows)
 
     # ---------- Projekt ----------
@@ -397,7 +478,8 @@ class MainWindow(QMainWindow):
         self.name_edits = {}
         for i, label in enumerate(labels):
             default = "Interviewer:in" if i == 0 else "Befragte:r" if len(labels) == 2 else f"Person {i}"
-            edit = QLineEdit((names or {}).get(label, default), placeholderText=label)
+            edit = QLineEdit((names or {}).get(label, default))
+            edit.setPlaceholderText(label)
             edit.textEdited.connect(self._refresh_combos)
             edit.textEdited.connect(self._mark_dirty)
             self.names_form.addRow(f"{label}:", edit)
@@ -480,6 +562,243 @@ class MainWindow(QMainWindow):
                     item.setText(new)
                     total += n
         self.status.setText(f"{total} Stelle(n) ersetzt.")
+
+    def _remove_row(self, row: int):
+        if 0 <= row < self.table.rowCount():
+            self.table.removeRow(row)
+
+    def delete_row(self, row: int):
+        if 0 <= row < self.table.rowCount():
+            if QMessageBox.question(self, "Absatz löschen", "Diesen Absatz wirklich löschen?") \
+                    == QMessageBox.StandardButton.Yes:
+                self._remove_row(row)
+                self._mark_dirty()
+                self.status.setText("Absatz gelöscht.")
+
+    def split_dialog(self, row: int):
+        if row < 0 or row >= self.table.rowCount():
+            return
+        item = self.table.item(row, COL_TEXT)
+        if not item:
+            return
+        dlg = SplitDialog(self, item.text())
+        if dlg.exec():
+            pos = dlg.split_position()
+            if 0 < pos < len(item.text()):
+                self.split_paragraph_at_cursor(row, pos)
+
+    def split_paragraph_at_cursor(self, row: int, cursor_pos: int):
+        if row < 0 or row >= self.table.rowCount():
+            return
+        item = self.table.item(row, COL_TEXT)
+        if not item:
+            return
+        text = item.text()
+        if cursor_pos <= 0 or cursor_pos >= len(text):
+            return
+        t0 = text[:cursor_pos].strip()
+        t1 = text[cursor_pos:].strip()
+        if not t0 or not t1:
+            return
+
+        s_curr, e_curr = self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        dur = e_curr - s_curr
+        mid = s_curr + dur * (len(t0) / max(len(text), 1))
+
+        item.setText(t0)
+        self.table.item(row, COL_TIME).setData(Qt.ItemDataRole.UserRole, (s_curr, mid))
+        self.table.item(row, COL_SMOOTH).setText("")
+
+        combo_curr = self.table.cellWidget(row, COL_SPEAKER)
+        current_speaker = combo_curr.currentData() if combo_curr else "SPEAKER_00"
+        all_speakers = list(self.name_edits.keys()) or [current_speaker]
+        if len(all_speakers) == 2:
+            next_speaker = all_speakers[1] if current_speaker == all_speakers[0] else all_speakers[0]
+        elif len(all_speakers) > 2:
+            idx = (all_speakers.index(current_speaker) + 1) % len(all_speakers) if current_speaker in all_speakers else 0
+            next_speaker = all_speakers[idx]
+        else:
+            next_speaker = current_speaker
+
+        self.table.blockSignals(True)
+        self.table.insertRow(row + 1)
+
+        t_item = QTableWidgetItem(fmt_time(mid))
+        t_item.setData(Qt.ItemDataRole.UserRole, (mid, e_curr))
+        t_item.setFlags(t_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        t_item.setToolTip("Zeile anklicken springt zur Stelle; Strg+Leertaste spielt ab.")
+        self.table.setItem(row + 1, COL_TIME, t_item)
+
+        combo = QComboBox()
+        names = self._names()
+        for label in all_speakers:
+            combo.addItem(names.get(label, label), label)
+        if next_speaker in all_speakers:
+            combo.setCurrentIndex(all_speakers.index(next_speaker))
+        combo.currentIndexChanged.connect(self._mark_dirty)
+        self.table.setCellWidget(row + 1, COL_SPEAKER, combo)
+
+        self.table.setItem(row + 1, COL_TEXT, QTableWidgetItem(t1))
+        self.table.setItem(row + 1, COL_SMOOTH, QTableWidgetItem(""))
+        self.table.blockSignals(False)
+
+        self.table.resizeRowToContents(row)
+        self.table.resizeRowToContents(row + 1)
+        self.table.setCurrentCell(row + 1, COL_TEXT)
+        self._mark_dirty()
+        self.status.setText("Absatz geteilt.")
+
+    def move_first_sentence_to_prev(self, row: int):
+        if row <= 0 or row >= self.table.rowCount():
+            return
+        t_curr = self.table.item(row, COL_TEXT).text().strip()
+        first_sent, remainder = split_first_sentence(t_curr)
+        if not first_sent:
+            return
+        t_prev = self.table.item(row - 1, COL_TEXT).text().strip()
+        new_prev = (t_prev + " " + first_sent).strip()
+        self.table.item(row - 1, COL_TEXT).setText(new_prev)
+        self.table.item(row - 1, COL_SMOOTH).setText("")
+
+        s_curr, e_curr = self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        s_prev, e_prev = self.table.item(row - 1, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        dur = e_curr - s_curr
+        frac = len(first_sent) / max(len(t_curr), 1)
+        time_shift = dur * frac
+        self.table.item(row - 1, COL_TIME).setData(Qt.ItemDataRole.UserRole, (s_prev, min(e_curr, e_prev + time_shift)))
+
+        if remainder:
+            new_s_curr = min(e_curr, s_curr + time_shift)
+            self.table.item(row, COL_TEXT).setText(remainder)
+            self.table.item(row, COL_SMOOTH).setText("")
+            self.table.item(row, COL_TIME).setText(fmt_time(new_s_curr))
+            self.table.item(row, COL_TIME).setData(Qt.ItemDataRole.UserRole, (new_s_curr, e_curr))
+            self.table.resizeRowToContents(row)
+            self.table.setCurrentCell(row, COL_TEXT)
+        else:
+            self._remove_row(row)
+            self.table.setCurrentCell(row - 1, COL_TEXT)
+
+        self.table.resizeRowToContents(row - 1)
+        self._mark_dirty()
+        self.status.setText("Ersten Satz an vorigen Absatz übergeben.")
+
+    def move_last_sentence_to_next(self, row: int):
+        if row < 0 or row >= self.table.rowCount() - 1:
+            return
+        t_curr = self.table.item(row, COL_TEXT).text().strip()
+        remainder, last_sent = split_last_sentence(t_curr)
+        if not last_sent:
+            return
+        t_next = self.table.item(row + 1, COL_TEXT).text().strip()
+        new_next = (last_sent + " " + t_next).strip()
+        self.table.item(row + 1, COL_TEXT).setText(new_next)
+        self.table.item(row + 1, COL_SMOOTH).setText("")
+
+        s_curr, e_curr = self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        s_next, e_next = self.table.item(row + 1, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        dur = e_curr - s_curr
+        frac = len(last_sent) / max(len(t_curr), 1)
+        time_shift = dur * frac
+        new_s_next = max(s_curr, s_next - time_shift)
+        self.table.item(row + 1, COL_TIME).setText(fmt_time(new_s_next))
+        self.table.item(row + 1, COL_TIME).setData(Qt.ItemDataRole.UserRole, (new_s_next, e_next))
+
+        if remainder:
+            new_e_curr = max(s_curr, e_curr - time_shift)
+            self.table.item(row, COL_TEXT).setText(remainder)
+            self.table.item(row, COL_SMOOTH).setText("")
+            self.table.item(row, COL_TIME).setData(Qt.ItemDataRole.UserRole, (s_curr, new_e_curr))
+            self.table.resizeRowToContents(row)
+            self.table.setCurrentCell(row, COL_TEXT)
+        else:
+            self._remove_row(row)
+            self.table.setCurrentCell(row, COL_TEXT)
+
+        self.table.resizeRowToContents(min(row + 1, self.table.rowCount() - 1))
+        self._mark_dirty()
+        self.status.setText("Letzten Satz an nächsten Absatz übergeben.")
+
+    def merge_with_prev(self, row: int):
+        if row <= 0 or row >= self.table.rowCount():
+            return
+        t_prev = self.table.item(row - 1, COL_TEXT).text().strip()
+        t_curr = self.table.item(row, COL_TEXT).text().strip()
+        s_prev, _ = self.table.item(row - 1, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        _, e_curr = self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)
+        self.table.item(row - 1, COL_TEXT).setText((t_prev + " " + t_curr).strip())
+        self.table.item(row - 1, COL_TIME).setData(Qt.ItemDataRole.UserRole, (s_prev, e_curr))
+        self.table.item(row - 1, COL_SMOOTH).setText("")
+        self._remove_row(row)
+        self.table.resizeRowToContents(row - 1)
+        self.table.setCurrentCell(row - 1, COL_TEXT)
+        self._mark_dirty()
+        self.status.setText("Mit vorigem Absatz zusammengeführt.")
+
+    def merge_with_next(self, row: int):
+        if row < 0 or row >= self.table.rowCount() - 1:
+            return
+        self.merge_with_prev(row + 1)
+
+    def auto_realign_speakers(self):
+        paras = self._paragraphs()
+        if not paras:
+            self.status.setText("Kein Transkript vorhanden.")
+            return
+        new_paras, count = realign_paragraph_boundaries(paras)
+        if count > 0:
+            self._fill(new_paras, self._names())
+            self._mark_dirty()
+            self.status.setText(f"{count} Sprechergrenzen automatisch korrigiert.")
+        else:
+            self.status.setText("Keine fehlerhaften Satzgrenzen gefunden.")
+
+    def toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+            self.act_fullscreen.setText("Vollbildmodus")
+        else:
+            self.showFullScreen()
+            self.act_fullscreen.setText("Fenstermodus")
+
+    def _table_context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0:
+            row = self.table.currentRow()
+        if row < 0 or row >= self.table.rowCount():
+            return
+        menu = QMenu(self)
+
+        act_split = menu.addAction("✂ Absatz teilen …")
+        act_split.setToolTip("Absatz an einer bestimmten Stelle aufteilen (auch mit Strg+Eingabe im Texteditor)")
+        act_split.triggered.connect(lambda: self.split_dialog(row))
+
+        menu.addSeparator()
+
+        act_first_prev = menu.addAction("⬆ Ersten Satz an vorigen Absatz übergeben\tCtrl+Shift+Up")
+        act_first_prev.setEnabled(row > 0)
+        act_first_prev.triggered.connect(lambda: self.move_first_sentence_to_prev(row))
+
+        act_last_next = menu.addAction("⬇ Letzten Satz an nächsten Absatz übergeben\tCtrl+Shift+Down")
+        act_last_next.setEnabled(row < self.table.rowCount() - 1)
+        act_last_next.triggered.connect(lambda: self.move_last_sentence_to_next(row))
+
+        menu.addSeparator()
+
+        act_m_prev = menu.addAction("Mit vorigem Absatz zusammenführen")
+        act_m_prev.setEnabled(row > 0)
+        act_m_prev.triggered.connect(lambda: self.merge_with_prev(row))
+
+        act_m_next = menu.addAction("Mit nächstem Absatz zusammenführen")
+        act_m_next.setEnabled(row < self.table.rowCount() - 1)
+        act_m_next.triggered.connect(lambda: self.merge_with_next(row))
+
+        menu.addSeparator()
+
+        act_del = menu.addAction("Absatz löschen")
+        act_del.triggered.connect(lambda: self.delete_row(row))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     # ---------- Wiedergabe ----------
     def _seek_to_row(self, row, *_):

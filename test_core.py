@@ -42,6 +42,61 @@ class MergeParagraphs(unittest.TestCase):
         self.assertEqual(merge_paragraphs([]), [])
 
 
+class SentenceSplittingAndRealignment(unittest.TestCase):
+    def test_split_first_sentence(self):
+        from core import split_first_sentence
+        self.assertEqual(split_first_sentence("Hallo Welt. Wie geht es dir?"), ("Hallo Welt.", "Wie geht es dir?"))
+        self.assertEqual(split_first_sentence("Nur ein Satz!"), ("Nur ein Satz!", ""))
+        self.assertEqual(split_first_sentence("Kein Satzzeichen hier"), ("Kein Satzzeichen hier", ""))
+
+    def test_split_last_sentence(self):
+        from core import split_last_sentence
+        self.assertEqual(split_last_sentence("Eins. Zwei. Drei."), ("Eins. Zwei.", "Drei."))
+        self.assertEqual(split_last_sentence("Eins. Zwei ohne Punkt"), ("Eins.", "Zwei ohne Punkt"))
+        self.assertEqual(split_last_sentence("Nur eins."), ("", "Nur eins."))
+
+    def test_split_trailing_fragment(self):
+        from core import split_trailing_fragment
+        self.assertEqual(split_trailing_fragment("Das ist gut. Und"), ("Das ist gut.", "Und"))
+        self.assertEqual(split_trailing_fragment("Das ist gut."), ("Das ist gut.", None))
+        self.assertEqual(split_trailing_fragment("Das ist gut. Das ist ein sehr viel zu langer Satz hier"),
+                         ("Das ist gut. Das ist ein sehr viel zu langer Satz hier", None))
+
+    def test_realign_case_a_moves_trailing_to_next(self):
+        from core import realign_paragraph_boundaries
+        paras = [
+            {"start": 0.0, "end": 5.0, "speaker": "A", "text": "Das ist mein Verdacht. Es"},
+            {"start": 5.0, "end": 10.0, "speaker": "B", "text": "ist zumindest eine These."},
+        ]
+        res, count = realign_paragraph_boundaries(paras)
+        self.assertEqual(count, 1)
+        self.assertEqual(res[0]["text"], "Das ist mein Verdacht.")
+        self.assertEqual(res[1]["text"], "Es ist zumindest eine These.")
+
+    def test_realign_case_b_appends_fragment_to_prev(self):
+        from core import realign_paragraph_boundaries
+        paras = [
+            {"start": 0.0, "end": 4.0, "speaker": "A", "text": "Weil man das wirklich"},
+            {"start": 4.0, "end": 8.0, "speaker": "B", "text": "braucht. Wer hat diese Nachfrage?"},
+        ]
+        res, count = realign_paragraph_boundaries(paras)
+        self.assertEqual(count, 1)
+        self.assertEqual(res[0]["text"], "Weil man das wirklich braucht.")
+        self.assertEqual(res[1]["text"], "Wer hat diese Nachfrage?")
+
+    def test_realign_case_b_absorbs_entire_paragraph(self):
+        from core import realign_paragraph_boundaries
+        paras = [
+            {"start": 0.0, "end": 4.0, "speaker": "A", "text": "Weil man das wirklich"},
+            {"start": 4.0, "end": 5.0, "speaker": "B", "text": "braucht."},
+        ]
+        res, count = realign_paragraph_boundaries(paras)
+        self.assertEqual(count, 1)
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["text"], "Weil man das wirklich braucht.")
+        self.assertEqual(res[0]["end"], 5.0)
+
+
 class CleanText(unittest.TestCase):
     def test_removes_fillers_and_fixes_commas(self):
         self.assertEqual(clean_text("Äh, also ich, ähm, weiß nicht."), "Also ich weiß nicht.")

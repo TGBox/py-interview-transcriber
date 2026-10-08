@@ -31,6 +31,10 @@ automatisch gespeichert.
    (existiert die Datei schon, als `-2`, `-3` …)
 3. Prüfen: Zeile anklicken springt zur Stelle, **Strg+Leertaste** spielt ab/pausiert. Text per Doppelklick korrigieren,
    Sprecher pro Absatz umhängen, Namen links eintragen, **Strg+H** sucht und ersetzt. **Strg+S** speichert das Projekt.
+   - **Absatz teilen:** Im Texteditor an der Cursorposition **Strg+Eingabe** drücken oder Rechtsklick → *Absatz teilen …*
+   - **Satzgrenzen korrigieren:** **Strg+Umschalt+Auf** übergibt den ersten Satz an die Zeile davor, **Strg+Umschalt+Ab** den letzten Satz an die Zeile danach.
+   - **Automatisch glätten:** *Bearbeiten → Sprechergrenzen automatisch glätten* korrigiert verschobene Satzanfänge/-enden über das gesamte Transkript.
+   - **Rechtsklick:** Kontextmenü zum Teilen, Zusammenführen und Löschen von Absätzen. **F11** schaltet den Vollbildmodus um.
 4. Optional **Mit Sprachmodell glätten** (Strg+G): füllt die Spalte *Geglättet (Sprachmodell)* Absatz für Absatz.
    Abbrechen jederzeit möglich, ein erneuter Klick setzt bei den leeren Absätzen fort; zum Neu-Glätten Zelle leeren.
    **Gelb markierte** Absätze weichen in der Länge stark vom Original ab – dort hat das Modell vermutlich gekürzt
@@ -42,7 +46,7 @@ Später weiterarbeiten: die `.transkript.json` über *Öffnen* laden.
 ## Ausgabeformen
 
 | Form | Inhalt |
-|---|---|
+| --- | --- |
 | Wörtlich | Alles, wie gesprochen: Füllwörter (äh, ähm), Wiederholungen, Pausen `(...)` ab 3 s, Zeitmarken |
 | Geglättet | Regelbasiert: Füllwörter, Stottern und Pausenmarken entfernt, Wortlaut sonst unverändert |
 | Geglättet (Sprachmodell) | Die gegengelesene Spalte aus „Mit Sprachmodell glätten“: zusätzlich Satzbau und Satzzeichen geglättet |
