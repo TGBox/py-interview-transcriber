@@ -5,8 +5,8 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPageLayout, QPageSize, QPalette, QPdfWriter, QTextDocument
+from PySide6.QtCore import QEvent, QMarginsF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QPageLayout, QPageSize, QPalette, QPdfWriter, QTextDocument
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
@@ -22,6 +22,9 @@ OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac 
 PROJECT_SUFFIX = ".transkript.json"
 COL_TIME, COL_SPEAKER, COL_TEXT, COL_SMOOTH = range(4)
 SUSPICIOUS_BG = QColor(255, 193, 7, 90)  # halbtransparentes Gelb, lesbar in hellem und dunklem Theme
+ZOOM_MIN = 70
+ZOOM_MAX = 220
+ZOOM_STEP = 15
 
 DARK_STYLESHEET = """
 QToolTip {
@@ -171,8 +174,19 @@ class MultilineDelegate(QStyledItemDelegate):
     """Lange Absätze mehrzeilig bearbeiten; Strg+Enter teilt den Absatz an der Cursorposition."""
     split_at = Signal(int, int)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.scale = 1.0
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        # Zusätzlicher vertikaler Freiraum für komfortables Klicken und Lesen
+        pad = max(6, int(12 * self.scale))
+        return QSize(size.width(), size.height() + pad)
+
     def createEditor(self, parent, option, index):
         editor = ParagraphEditor(parent)
+        editor.setFont(parent.font())
         row = index.row()
 
         def on_split(pos):
@@ -343,6 +357,11 @@ class MainWindow(QMainWindow):
         self.act_dark_mode = self._act("Dunkles Design", self.toggle_dark_mode, "Ctrl+D")
         self.act_dark_mode.setCheckable(True)
         self.act_dark_mode.setChecked(self.settings.value("dark_mode", False, type=bool))
+        self.act_zoom_in = self._act("Vergrößern", self.zoom_in)
+        self.act_zoom_in.setShortcuts([QKeySequence.StandardKey.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
+        self.act_zoom_out = self._act("Verkleinern", self.zoom_out)
+        self.act_zoom_out.setShortcuts([QKeySequence.StandardKey.ZoomOut, QKeySequence("Ctrl+-")])
+        self.act_zoom_reset = self._act("Standardgröße (100%)", self.zoom_reset, "Ctrl+0")
 
         # Menü für Seltenes
         m = self.menuBar().addMenu("&Datei")
@@ -356,6 +375,10 @@ class MainWindow(QMainWindow):
         m_edit.addAction(self.act_first_to_prev)
         m_edit.addAction(self.act_last_to_next)
         m_view = self.menuBar().addMenu("&Ansicht")
+        m_view.addAction(self.act_zoom_in)
+        m_view.addAction(self.act_zoom_out)
+        m_view.addAction(self.act_zoom_reset)
+        m_view.addSeparator()
         m_view.addAction(self.act_dark_mode)
         m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
@@ -426,13 +449,21 @@ class MainWindow(QMainWindow):
         self.text_delegate = MultilineDelegate(self.table)
         self.text_delegate.split_at.connect(self.split_paragraph_at_cursor)
         self.table.setItemDelegateForColumn(COL_TEXT, self.text_delegate)
-        self.table.setItemDelegateForColumn(COL_SMOOTH, MultilineDelegate(self.table))
+        self.smooth_delegate = MultilineDelegate(self.table)
+        self.table.setItemDelegateForColumn(COL_SMOOTH, self.smooth_delegate)
         self.table.setColumnHidden(COL_SMOOTH, True)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.currentCellChanged.connect(self._seek_to_row)
         self.table.addAction(self.act_first_to_prev)
         self.table.addAction(self.act_last_to_next)
+        self.table.addAction(self.act_zoom_in)
+        self.table.addAction(self.act_zoom_out)
+        self.table.addAction(self.act_zoom_reset)
+        self.table.viewport().installEventFilter(self)
         self.addAction(self.act_fullscreen)
+        self.addAction(self.act_zoom_in)
+        self.addAction(self.act_zoom_out)
+        self.addAction(self.act_zoom_reset)
 
         split = QSplitter()
         split.addWidget(left)
@@ -446,12 +477,19 @@ class MainWindow(QMainWindow):
         self.bar.setVisible(False)
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.bar)
+        self.zoom_button = QToolButton()
+        self.zoom_button.setAutoRaise(True)
+        self.zoom_button.setToolTip("Zoomstufe der Tabelle ändern.\nKlicken zum Zurücksetzen auf 100%.\nStrg++ / Strg+- oder Strg+Mausrad.")
+        self.zoom_button.clicked.connect(self.zoom_reset)
+        self.statusBar().addPermanentWidget(self.zoom_button)
         self.llm_button = QToolButton()
         self.llm_button.setAutoRaise(True)
         self.llm_button.clicked.connect(self.open_settings)
         self.statusBar().addPermanentWidget(self.llm_button)
         self._save_after = False
         self._set_busy(False)
+        self.zoom_level = self.settings.value("zoom_level", 100, type=int)
+        self.set_zoom(self.zoom_level)
         QTimer.singleShot(0, self.refresh_llm_status)  # nach dem Anzeigen, damit der Start nicht wartet
 
     def _act(self, text, slot, shortcut=None):
@@ -599,6 +637,7 @@ class MainWindow(QMainWindow):
             disp = speaker_display_name(label)
             default = "Interviewer:in" if i == 0 else "Befragte:r" if len(labels) == 2 else f"Person {i + 1}"
             edit = QLineEdit((names or {}).get(label, default))
+            edit.setFont(self.table.font())
             edit.setPlaceholderText(disp)
             edit.textEdited.connect(self._refresh_combos)
             edit.textEdited.connect(self._mark_dirty)
@@ -899,6 +938,59 @@ class MainWindow(QMainWindow):
         set_theme(checked)
         self.refresh_llm_status()
 
+    def eventFilter(self, watched, event):
+        if hasattr(self, "table") and watched == self.table.viewport() and event.type() == QEvent.Type.Wheel:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self.zoom_in()
+                elif delta < 0:
+                    self.zoom_out()
+                return True
+        return super().eventFilter(watched, event)
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom_level + ZOOM_STEP)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom_level - ZOOM_STEP)
+
+    def zoom_reset(self):
+        self.set_zoom(100)
+
+    def set_zoom(self, zoom: int):
+        self.zoom_level = max(ZOOM_MIN, min(ZOOM_MAX, zoom))
+        self.settings.setValue("zoom_level", self.zoom_level)
+        scale = self.zoom_level / 100.0
+
+        if hasattr(self, "text_delegate"):
+            self.text_delegate.scale = scale
+        if hasattr(self, "smooth_delegate"):
+            self.smooth_delegate.scale = scale
+
+        base_pt = QApplication.font().pointSizeF()
+        if base_pt <= 0:
+            base_pt = 10.0
+
+        zoomed_font = QFont(QApplication.font())
+        zoomed_font.setPointSizeF(base_pt * scale)
+
+        self.table.setFont(zoomed_font)
+        self.table.horizontalHeader().setFont(zoomed_font)
+
+        if hasattr(self, "title_edit"):
+            self.title_edit.setFont(zoomed_font)
+        if hasattr(self, "name_edits"):
+            for edit in self.name_edits.values():
+                edit.setFont(zoomed_font)
+
+        self.table.resizeRowsToContents()
+        self.table.resizeColumnToContents(COL_TIME)
+        self.table.resizeColumnToContents(COL_SPEAKER)
+
+        if hasattr(self, "zoom_button"):
+            self.zoom_button.setText(f"{self.zoom_level}%")
+
     def _table_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
         if row < 0:
@@ -1027,8 +1119,7 @@ class MainWindow(QMainWindow):
             url, model = self._llm()
 
             def job(progress, cancelled, _item):
-                progress(f"Fasse mit {model} zusammen (kann einige Minuten dauern) …", -1)
-                return llm.summarize(paragraphs, names, url, model)
+                return llm.summarize(paragraphs, names, url, model, progress=progress, cancelled=cancelled)
 
             self._run(job, lambda md: self._write(path, kind, summary_blocks(title, md)))
         else:

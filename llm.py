@@ -54,10 +54,12 @@ def status(base_url: str, model: str) -> tuple[bool, str, list[str]]:
     return (*describe_status(version, models, loaded, model), models)
 
 
-def chat(base_url: str, model: str, system: str, user: str, num_ctx: int, timeout: float = 1800) -> str:
+def chat(base_url: str, model: str, system: str, user: str, num_ctx: int, timeout: float = 1800,
+         on_chunk=None, cancelled=None) -> str:
+    stream = on_chunk is not None or cancelled is not None
     body = {
         "model": model,
-        "stream": False,
+        "stream": stream,
         "think": False,
         "options": {"num_ctx": num_ctx, "temperature": 0},
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -66,7 +68,24 @@ def chat(base_url: str, model: str, system: str, user: str, num_ctx: int, timeou
                                  {"Content-Type": "application/json"})
     try:
         with _opener.open(req, timeout=timeout) as r:
-            return json.load(r)["message"]["content"]
+            if not stream:
+                return json.load(r)["message"]["content"]
+            parts = []
+            for line in r:
+                if cancelled and cancelled():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line.decode("utf-8"))
+                chunk = data.get("message", {}).get("content", "")
+                if chunk:
+                    parts.append(chunk)
+                    if on_chunk:
+                        on_chunk(chunk)
+                if data.get("done", False):
+                    break
+            return "".join(parts)
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Ollama-Fehler {e.code}: {e.read().decode(errors='replace')}\n"
                            f"Modell installiert? → ollama pull {model}") from e
@@ -95,7 +114,43 @@ def needs_smoothing(paragraphs: list[dict]) -> list[int]:
     return [i for i, p in enumerate(paragraphs) if clean_text(p["text"]) and not p.get("smooth")]
 
 
-def summarize(paragraphs: list[dict], names: dict[str, str], base_url: str, model: str) -> str:
+def summarize(paragraphs: list[dict], names: dict[str, str], base_url: str, model: str,
+              progress=None, cancelled=None) -> str:
+    import time
+
     transcript = "\n".join(f"{b[2]}: {b[3]}" for b in render("", paragraphs, names, "geglaettet")[1:])
     # ponytail: num_ctx reicht für ~1,5 h Interview; länger → abschnittsweise zusammenfassen
-    return chat(base_url, model, SUMMARY_PROMPT, transcript, num_ctx=32768)
+    transcript_words = len(transcript.split())
+    # Erwartete Zusammenfassungslänge: ~20% des Transkripts, begrenzt auf 200..700 Wörter
+    expected_words = max(200, min(700, int(transcript_words * 0.2) or 300))
+
+    if progress:
+        progress(f"Transkript wird eingelesen ({transcript_words} Wörter) …", 0)
+
+    start_gen_time = None
+    accumulated_text = []
+    accumulated_words = 0
+
+    def handle_chunk(chunk: str):
+        nonlocal start_gen_time, accumulated_words
+        if start_gen_time is None:
+            start_gen_time = time.monotonic()
+
+        accumulated_text.append(chunk)
+        current_words = len("".join(accumulated_text).split())
+        if current_words != accumulated_words:
+            accumulated_words = current_words
+            elapsed = time.monotonic() - start_gen_time
+            wps = accumulated_words / elapsed if elapsed > 0.5 else 0.0
+            # Fortschrittsbalken nähert sich bis 95% an, springt bei Abschluss auf 100%
+            pct = min(95, max(5, int((accumulated_words / expected_words) * 90) + 5))
+            if progress:
+                speed_str = f" · ca. {wps:.1f} W/s" if wps > 0 else ""
+                progress(f"Fasse zusammen: {accumulated_words} Wörter generiert{speed_str} …", pct)
+
+    out = chat(base_url, model, SUMMARY_PROMPT, transcript, num_ctx=32768,
+               on_chunk=handle_chunk if progress else None, cancelled=cancelled)
+    if progress and not (cancelled and cancelled()):
+        final_words = len(out.split())
+        progress(f"Zusammenfassung fertiggestellt ({final_words} Wörter).", 100)
+    return out

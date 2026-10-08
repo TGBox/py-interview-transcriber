@@ -34,12 +34,13 @@ automatisch gespeichert.
    - **Absatz teilen:** Im Texteditor an der Cursorposition **Strg+Eingabe** drücken oder Rechtsklick → *Absatz teilen …*
    - **Satzgrenzen korrigieren:** **Strg+Umschalt+Auf** übergibt den ersten Satz an die Zeile davor, **Strg+Umschalt+Ab** den letzten Satz an die Zeile danach.
    - **Automatisch glätten:** *Bearbeiten → Sprechergrenzen automatisch glätten* korrigiert verschobene Satzanfänge/-enden über das gesamte Transkript.
+   - **Zoom & Lesbarkeit:** **Strg++** vergrößert die Tabelle und Eingabefelder, **Strg+-** verkleinert, **Strg+0** setzt auf 100% zurück. Alternativ **Strg + Mausrad** oder Klick auf die Prozentanzeige in der Statusleiste.
    - **Rechtsklick:** Kontextmenü zum Teilen, Zusammenführen und Löschen von Absätzen. **F11** schaltet den Vollbildmodus um, **Strg+D** wechselt zwischen hellem und dunklem Design.
 4. Optional **Mit Sprachmodell glätten** (Strg+G): füllt die Spalte *Geglättet (Sprachmodell)* Absatz für Absatz.
    Abbrechen jederzeit möglich, ein erneuter Klick setzt bei den leeren Absätzen fort; zum Neu-Glätten Zelle leeren.
    **Gelb markierte** Absätze weichen in der Länge stark vom Original ab – dort hat das Modell vermutlich gekürzt
    oder ergänzt, bitte gegenlesen.
-5. *Form* wählen und als **Word** (Strg+E) oder **PDF** (Strg+Umschalt+E) exportieren
+5. *Form* wählen und als **Word** (Strg+E) oder **PDF** (Strg+Umschalt+E) exportieren (bei *Sinngemäße Zusammenfassung* mit Live-Fortschrittsbalken und Wortzähler).
 
 Später weiterarbeiten: die `.transkript.json` über *Öffnen* laden.
 

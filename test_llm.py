@@ -59,5 +59,31 @@ class RenderLlmForm(unittest.TestCase):
         self.assertEqual(render("T", ps, {}, "geglaettet_llm")[1:], [("p", "00:00:01", "S", "Ja, gut.")])
 
 
+class Summarize(unittest.TestCase):
+    def test_summarize_reports_progress(self):
+        ps = [{"start": 0, "end": 2, "speaker": "S", "text": "Wir testen die Zusammenfassung mit mehreren Wörtern."}]
+        progress_calls = []
+
+        def mock_chat(base_url, model, system, user, num_ctx, timeout=1800, on_chunk=None, cancelled=None):
+            if on_chunk:
+                on_chunk("## Thema A\n")
+                on_chunk("- Erster Punkt der Zusammenfassung.\n")
+                on_chunk("- Zweiter wichtiger Punkt.")
+            return "## Thema A\n- Erster Punkt der Zusammenfassung.\n- Zweiter wichtiger Punkt."
+
+        with mock.patch.object(llm, "chat", side_effect=mock_chat):
+            res = llm.summarize(ps, {"S": "Person"}, "u", "m",
+                                progress=lambda text, pct: progress_calls.append((text, pct)))
+
+        self.assertIn("Thema A", res)
+        self.assertTrue(len(progress_calls) >= 2)
+        # First call is transcript ingestion (0%)
+        self.assertEqual(progress_calls[0][1], 0)
+        self.assertIn("Transkript wird eingelesen", progress_calls[0][0])
+        # Last call is 100% completion
+        self.assertEqual(progress_calls[-1][1], 100)
+        self.assertIn("Zusammenfassung fertiggestellt", progress_calls[-1][0])
+
+
 if __name__ == "__main__":
     unittest.main()

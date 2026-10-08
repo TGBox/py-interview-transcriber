@@ -88,7 +88,34 @@ class TestMainWindowEditing(unittest.TestCase):
         self.assertFalse(self.win.settings.value("dark_mode", type=bool))
         self.assertFalse(self.win.act_dark_mode.isChecked())
 
+    def test_zoom_scaling(self):
+        self.win.set_zoom(100)
+        font_100 = self.win.table.font().pointSizeF()
+        self.win.zoom_in()
+        self.assertEqual(self.win.zoom_level, 115)
+        self.assertGreater(self.win.table.font().pointSizeF(), font_100)
+        self.assertEqual(self.win.zoom_button.text(), "115%")
+
+        self.win.zoom_out()
+        self.assertEqual(self.win.zoom_level, 100)
+        self.assertEqual(self.win.zoom_button.text(), "100%")
+
+        self.win.zoom_in()
+        self.win.zoom_reset()
+        self.assertEqual(self.win.zoom_level, 100)
+
+    def test_delegate_size_hint_padding(self):
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        opt = QStyleOptionViewItem()
+        idx = self.win.table.model().index(0, COL_TEXT)
+        self.win.set_zoom(100)
+        hint_100 = self.win.text_delegate.sizeHint(opt, idx)
+        self.win.set_zoom(150)
+        hint_150 = self.win.text_delegate.sizeHint(opt, idx)
+        self.assertGreater(hint_150.height(), hint_100.height())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
