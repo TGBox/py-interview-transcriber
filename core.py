@@ -204,20 +204,108 @@ def summary_blocks(title: str, markdown: str) -> list[Block]:
     return blocks
 
 
+SPEAKER_PALETTE = [
+    "#1d4ed8",  # Blau
+    "#7e22ce",  # Violett
+    "#047857",  # Smaragdgrün
+    "#c2410c",  # Rostorange
+    "#0891b2",  # Cyan
+    "#b91c1c",  # Dunkelrot
+]
+
+
 def to_html(blocks: list[Block]) -> str:
-    parts = []
+    title = ""
+    rows = []
+    speaker_colors: dict[str, str] = {}
+
+    def get_speaker_color(speaker_name: str) -> str:
+        if speaker_name not in speaker_colors:
+            speaker_colors[speaker_name] = SPEAKER_PALETTE[len(speaker_colors) % len(SPEAKER_PALETTE)]
+        return speaker_colors[speaker_name]
+
     for b in blocks:
         kind = b[0]
-        if kind == "p":
-            ts = f'<span style="color:#888">[{b[1]}]</span> ' if b[1] else ""
-            parts.append(f'<p style="margin:0 0 10pt 0">{ts}<b>{escape(b[2])}:</b> {escape(b[3])}</p>')
+        if kind == "h1":
+            title = b[1]
+        elif kind == "h2":
+            rows.append(
+                f'<tr>'
+                f'<td colspan="2" style="padding: 16pt 0 6pt 0; border-bottom: 1.5px solid #cbd5e1;">'
+                f'<span style="font-size: 13pt; font-weight: bold; color: #0f172a;">{escape(b[1])}</span>'
+                f'</td>'
+                f'</tr>'
+            )
+        elif kind == "p":
+            ts = b[1] or ""
+            speaker = b[2]
+            text = b[3]
+            color = get_speaker_color(speaker)
+            ts_html = f'<div style="color: #64748b; font-size: 8pt; margin-top: 2pt; font-family: monospace;">[{escape(ts)}]</div>' if ts else ""
+            rows.append(
+                f'<tr>'
+                f'<td width="24%" style="vertical-align: top; padding: 7pt 6pt 7pt 0; border-bottom: 1px solid #e2e8f0;">'
+                f'<span style="font-size: 9.5pt; font-weight: bold; color: {color};">{escape(speaker)}</span>'
+                f'{ts_html}'
+                f'</td>'
+                f'<td width="76%" style="vertical-align: top; padding: 7pt 0 7pt 8pt; border-bottom: 1px solid #e2e8f0; font-size: 10pt; line-height: 1.55; color: #1e293b;">'
+                f'{escape(text)}'
+                f'</td>'
+                f'</tr>'
+            )
         elif kind == "li":
-            parts.append(f'<p style="margin:0 0 4pt 12pt">• {escape(b[1])}</p>')
+            rows.append(
+                f'<tr>'
+                f'<td colspan="2" style="padding: 3pt 0 3pt 14pt; border-bottom: none; font-size: 10pt; color: #334155;">'
+                f'• {escape(b[1])}'
+                f'</td>'
+                f'</tr>'
+            )
         elif kind == "text":
-            parts.append(f"<p>{escape(b[1])}</p>")
-        else:  # h1/h2
-            parts.append(f"<{kind}>{escape(b[1])}</{kind}>")
-    return f'<html><body style="font-family:Calibri,Arial,sans-serif;font-size:11pt">{"".join(parts)}</body></html>'
+            rows.append(
+                f'<tr>'
+                f'<td colspan="2" style="padding: 6pt 0; border-bottom: none; font-size: 10pt; line-height: 1.5; color: #334155;">'
+                f'{escape(b[1])}'
+                f'</td>'
+                f'</tr>'
+            )
+        else:
+            rows.append(
+                f'<tr>'
+                f'<td colspan="2" style="padding: 4pt 0;">'
+                f'<{kind}>{escape(b[1])}</{kind}>'
+                f'</td>'
+                f'</tr>'
+            )
+
+    title_html = (
+        f'<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom: 14pt; border-bottom: 2px solid #0284c7; padding-bottom: 8pt;">'
+        f'<tr>'
+        f'<td>'
+        f'<div style="font-size: 8.5pt; font-weight: bold; color: #0284c7; letter-spacing: 1px;">INTERVIEW-TRANSKRIPT</div>'
+        f'<div style="font-size: 18pt; font-weight: bold; color: #0f172a; margin-top: 3pt;">{escape(title)}</div>'
+        f'</td>'
+        f'</tr>'
+        f'</table>'
+    ) if title else ""
+
+    return (
+        '<!DOCTYPE html>'
+        '<html>'
+        '<head>'
+        '<meta charset="utf-8">'
+        '<style>'
+        'body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; font-size: 10pt; color: #1e293b; }'
+        '</style>'
+        '</head>'
+        '<body>'
+        f'{title_html}'
+        f'<table width="100%" cellpadding="0" cellspacing="0">'
+        f'{"".join(rows)}'
+        f'</table>'
+        '</body>'
+        '</html>'
+    )
 
 
 def to_docx(path: str, blocks: list[Block], line_numbers: bool = False) -> None:

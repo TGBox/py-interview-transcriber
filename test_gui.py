@@ -21,6 +21,13 @@ class TestMainWindowEditing(unittest.TestCase):
         ]
         self.win._fill(self.paragraphs, {"SPEAKER_00": "Person A", "SPEAKER_01": "Person B"})
 
+    def tearDown(self):
+        if hasattr(self.win, "player"):
+            self.win.player.stop()
+            self.win.player.setAudioOutput(None)
+        self.win.deleteLater()
+        self.app.processEvents()
+
     def test_split_paragraph_at_cursor(self):
         # Split row 0 at "Erster Satz. " (index 12)
         self.win.split_paragraph_at_cursor(0, 12)
@@ -114,8 +121,43 @@ class TestMainWindowEditing(unittest.TestCase):
         hint_150 = self.win.text_delegate.sizeHint(opt, idx)
         self.assertGreater(hint_150.height(), hint_100.height())
 
+    def test_toggle_smooth_column(self):
+        # Initial: no smooth texts -> column hidden
+        self.assertTrue(self.win.table.isColumnHidden(COL_SMOOTH))
+        self.assertFalse(self.win.act_toggle_smooth_col.isChecked())
+
+        # Toggle to show
+        self.win.toggle_smooth_column(True)
+        self.assertFalse(self.win.table.isColumnHidden(COL_SMOOTH))
+        self.assertTrue(self.win.act_toggle_smooth_col.isChecked())
+
+        # Toggle to hide without argument
+        self.win.toggle_smooth_column()
+        self.assertTrue(self.win.table.isColumnHidden(COL_SMOOTH))
+        self.assertFalse(self.win.act_toggle_smooth_col.isChecked())
+
+        # Toggle to show again
+        self.win.toggle_smooth_column()
+        self.assertFalse(self.win.table.isColumnHidden(COL_SMOOTH))
+        self.assertTrue(self.win.act_toggle_smooth_col.isChecked())
+
+    def test_zoom_scales_toolbar_and_menubar(self):
+        self.win.set_zoom(100)
+        menu_pt_100 = self.win.menuBar().font().pointSizeF()
+        tb_pt_100 = self.win.tb.font().pointSizeF()
+        icon_sz_100 = self.win.tb.iconSize().width()
+
+        self.win.set_zoom(150)
+        self.assertGreater(self.win.menuBar().font().pointSizeF(), menu_pt_100)
+        self.assertGreater(self.win.tb.font().pointSizeF(), tb_pt_100)
+        self.assertGreater(self.win.tb.iconSize().width(), icon_sz_100)
+
+        self.win.set_zoom(100)
+        self.assertEqual(self.win.tb.iconSize().width(), icon_sz_100)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

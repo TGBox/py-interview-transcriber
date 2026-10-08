@@ -43,6 +43,8 @@ QTableWidget {
     gridline-color: #333333;
     selection-background-color: #0e639c;
     selection-color: #ffffff;
+    background-color: #1e1e1e;
+    color: #e0e0e0;
 }
 QComboBox, QLineEdit, QSpinBox, QPlainTextEdit {
     background-color: #252526;
@@ -71,9 +73,97 @@ QPushButton:pressed {
 QToolBar {
     border-bottom: 1px solid #333333;
     spacing: 4px;
+    background-color: #252526;
 }
 QStatusBar {
     border-top: 1px solid #333333;
+    background-color: #252526;
+}
+QMenuBar {
+    background-color: #252526;
+    color: #e0e0e0;
+}
+QMenuBar::item:selected {
+    background-color: #3e3e42;
+}
+QMenu {
+    background-color: #252526;
+    color: #e0e0e0;
+    border: 1px solid #3f3f46;
+}
+QMenu::item:selected {
+    background-color: #0e639c;
+}
+"""
+
+LIGHT_STYLESHEET = """
+QToolTip {
+    background-color: #ffffff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    padding: 4px;
+}
+QHeaderView::section {
+    background-color: #f1f5f9;
+    color: #334155;
+    padding: 4px;
+    border: 1px solid #cbd5e1;
+    font-weight: 600;
+}
+QTableWidget {
+    gridline-color: #e2e8f0;
+    selection-background-color: #0e639c;
+    selection-color: #ffffff;
+    background-color: #ffffff;
+    color: #1e293b;
+}
+QComboBox, QLineEdit, QSpinBox, QPlainTextEdit {
+    background-color: #ffffff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+    padding: 3px 6px;
+}
+QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QPlainTextEdit:hover {
+    border-color: #0e639c;
+}
+QPushButton {
+    background-color: #f8fafc;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+    padding: 4px 12px;
+}
+QPushButton:hover {
+    background-color: #f1f5f9;
+    border-color: #0e639c;
+}
+QPushButton:pressed {
+    background-color: #e2e8f0;
+}
+QToolBar {
+    border-bottom: 1px solid #e2e8f0;
+    spacing: 4px;
+    background-color: #f8fafc;
+}
+QStatusBar {
+    border-top: 1px solid #e2e8f0;
+    background-color: #f8fafc;
+}
+QMenuBar {
+    background-color: #f8fafc;
+    color: #1e293b;
+}
+QMenuBar::item:selected {
+    background-color: #e2e8f0;
+}
+QMenu {
+    background-color: #ffffff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+}
+QMenu::item:selected {
+    background-color: #e2e8f0;
 }
 """
 
@@ -110,6 +200,38 @@ def dark_palette() -> QPalette:
     return pal
 
 
+def light_palette() -> QPalette:
+    pal = QPalette()
+    bg = QColor(248, 250, 252)
+    base = QColor(255, 255, 255)
+    alt_base = QColor(241, 245, 249)
+    text = QColor(30, 41, 59)
+    btn = QColor(241, 245, 249)
+    highlight = QColor(14, 99, 156)
+    highlight_text = QColor(255, 255, 255)
+    disabled_text = QColor(148, 163, 184)
+
+    pal.setColor(QPalette.ColorRole.Window, bg)
+    pal.setColor(QPalette.ColorRole.WindowText, text)
+    pal.setColor(QPalette.ColorRole.Base, base)
+    pal.setColor(QPalette.ColorRole.AlternateBase, alt_base)
+    pal.setColor(QPalette.ColorRole.ToolTipBase, base)
+    pal.setColor(QPalette.ColorRole.ToolTipText, text)
+    pal.setColor(QPalette.ColorRole.Text, text)
+    pal.setColor(QPalette.ColorRole.Button, btn)
+    pal.setColor(QPalette.ColorRole.ButtonText, text)
+    pal.setColor(QPalette.ColorRole.Highlight, highlight)
+    pal.setColor(QPalette.ColorRole.HighlightedText, highlight_text)
+    pal.setColor(QPalette.ColorRole.Link, QColor(14, 99, 156))
+
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(226, 232, 240))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, disabled_text)
+    return pal
+
+
 def set_theme(dark: bool):
     app = QApplication.instance()
     if not app:
@@ -119,8 +241,8 @@ def set_theme(dark: bool):
         app.setPalette(dark_palette())
         app.setStyleSheet(DARK_STYLESHEET)
     else:
-        app.setPalette(app.style().standardPalette())
-        app.setStyleSheet("")
+        app.setPalette(light_palette())
+        app.setStyleSheet(LIGHT_STYLESHEET)
 
 
 def status_colors(dark: bool = False) -> tuple[str, str]:
@@ -157,6 +279,19 @@ class Worker(QThread):
         except Exception as e:  # noqa: BLE001 – jeder Fehler soll in der GUI landen, nicht den Thread killen
             if not self.cancel_requested:
                 self.failed.emit(f"{type(e).__name__}: {e}")
+
+
+class StatusWorker(QThread):
+    """Prüft Erreichbarkeit und Modelle von Ollama asynchron im Hintergrund."""
+    done = Signal(bool, str, list)
+
+    def __init__(self, url: str, model: str, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.model = model
+
+    def run(self):
+        self.done.emit(*llm.status(self.url, self.model))
 
 
 class ParagraphEditor(QPlainTextEdit):
@@ -249,6 +384,10 @@ class ReplaceDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, parent, settings: QSettings):
         super().__init__(parent)
+        self.settings = settings
+        self.original_dark = settings.value("dark_mode", False, type=bool)
+        self._last_status_ok = False
+        self._worker: QThread | None = None
         self.setWindowTitle("Einstellungen")
         self.setMinimumWidth(560)
         form = QFormLayout(self)
@@ -257,8 +396,8 @@ class SettingsDialog(QDialog):
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Helles Design", False)
         self.theme_combo.addItem("Dunkles Design", True)
-        self.theme_combo.setCurrentIndex(1 if settings.value("dark_mode", False, type=bool) else 0)
-        self.theme_combo.currentIndexChanged.connect(self.check)
+        self.theme_combo.setCurrentIndex(1 if self.original_dark else 0)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_changed)
         form.addRow("Farbschema:", self.theme_combo)
 
         form.addRow(QLabel("<b>Sprechererkennung</b>"))
@@ -300,17 +439,38 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
-        self.check()
+        self.state.setText("● Prüfe Verbindung zu Ollama …")
+        QTimer.singleShot(0, self.check)
+
+    def _on_theme_changed(self):
+        dark = self.theme_combo.currentData()
+        set_theme(dark)
+        ok_col, err_col = status_colors(dark)
+        self.state.setStyleSheet(f"color: {ok_col if self._last_status_ok else err_col}")
 
     def check(self, *_):
+        url = self.url.text().strip() or llm.DEFAULT_URL
         current = self.model.currentText().strip()
-        ok, text, models = llm.status(self.url.text(), current)
-        self.model.clear()
-        self.model.addItems(models)
-        self.model.setCurrentText(current)  # auch nicht installierte Namen bleiben eintragbar
-        self.state.setText(f"● {text}")
-        ok_col, err_col = status_colors(self.theme_combo.currentData())
-        self.state.setStyleSheet(f"color: {ok_col if ok else err_col}")
+        self.state.setText("● Prüfe Verbindung zu Ollama …")
+        self.state.setStyleSheet("color: #888888")
+
+        self._worker = StatusWorker(url, current, self)
+
+        def on_done(ok, text, models):
+            self._last_status_ok = ok
+            self.model.clear()
+            self.model.addItems(models)
+            self.model.setCurrentText(current)
+            self.state.setText(f"● {text}")
+            ok_col, err_col = status_colors(self.theme_combo.currentData())
+            self.state.setStyleSheet(f"color: {ok_col if ok else err_col}")
+
+        self._worker.done.connect(on_done)
+        self._worker.start()
+
+    def reject(self):
+        set_theme(self.original_dark)
+        super().reject()
 
     def save(self, settings: QSettings):
         settings.setValue("dark_mode", self.theme_combo.currentData())
@@ -357,6 +517,9 @@ class MainWindow(QMainWindow):
         self.act_dark_mode = self._act("Dunkles Design", self.toggle_dark_mode, "Ctrl+D")
         self.act_dark_mode.setCheckable(True)
         self.act_dark_mode.setChecked(self.settings.value("dark_mode", False, type=bool))
+        self.act_toggle_smooth_col = self._act("Spalte „Geglättet“ anzeigen", self.toggle_smooth_column, "Ctrl+K")
+        self.act_toggle_smooth_col.setCheckable(True)
+        self.act_toggle_smooth_col.setChecked(False)
         self.act_zoom_in = self._act("Vergrößern", self.zoom_in)
         self.act_zoom_in.setShortcuts([QKeySequence.StandardKey.ZoomIn, QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
         self.act_zoom_out = self._act("Verkleinern", self.zoom_out)
@@ -370,6 +533,7 @@ class MainWindow(QMainWindow):
         m_edit = self.menuBar().addMenu("&Bearbeiten")
         m_edit.addAction(self.act_replace)
         m_edit.addAction(self.act_smooth)
+        m_edit.addAction(self.act_toggle_smooth_col)
         m_edit.addSeparator()
         m_edit.addAction(self.act_realign)
         m_edit.addAction(self.act_first_to_prev)
@@ -379,47 +543,49 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_zoom_out)
         m_view.addAction(self.act_zoom_reset)
         m_view.addSeparator()
+        m_view.addAction(self.act_toggle_smooth_col)
         m_view.addAction(self.act_dark_mode)
         m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
 
         # Toolbar für Häufiges
-        tb = self.addToolBar("Aktionen")
-        tb.setMovable(False)
-        tb.addAction(self.act_open)
-        tb.addAction(self.act_save)
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Sprecher: "))
+        self.tb = self.addToolBar("Aktionen")
+        self.tb.setMovable(False)
+        self.tb.addAction(self.act_open)
+        self.tb.addAction(self.act_save)
+        self.tb.addSeparator()
+        self.tb.addWidget(QLabel(" Sprecher: "))
         self.spin = QSpinBox()
         self.spin.setRange(0, 10)
         self.spin.setSpecialValueText("auto")
         self.spin.setValue(self.settings.value("num_speakers", 2, type=int))
         self.spin.valueChanged.connect(lambda v: self.settings.setValue("num_speakers", v))
         self.spin.setToolTip("Bekannte Sprecheranzahl verbessert die Erkennung deutlich. 0 = automatisch.")
-        tb.addWidget(self.spin)
-        tb.addWidget(QLabel("  Fachbegriffe: "))
+        self.tb.addWidget(self.spin)
+        self.tb.addWidget(QLabel("  Fachbegriffe: "))
         self.hotwords = QLineEdit(self.settings.value("hotwords", ""))
         self.hotwords.setMaximumWidth(260)
         self.hotwords.setPlaceholderText("z. B. Namen, Produkte, Abkürzungen")
         self.hotwords.setToolTip("Begriffe, die Whisper richtig schreiben soll (Leerzeichen-getrennt).")
         self.hotwords.editingFinished.connect(lambda: self.settings.setValue("hotwords", self.hotwords.text()))
-        tb.addWidget(self.hotwords)
-        tb.addSeparator()
-        tb.addAction(self.act_play)
-        tb.addAction(self.act_smooth)
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Form: "))
+        self.tb.addWidget(self.hotwords)
+        self.tb.addSeparator()
+        self.tb.addAction(self.act_play)
+        self.tb.addAction(self.act_smooth)
+        self.tb.addAction(self.act_toggle_smooth_col)
+        self.tb.addSeparator()
+        self.tb.addWidget(QLabel(" Form: "))
         self.form = QComboBox()
         for key, label in FORMS.items():
             self.form.addItem(label, key)
         self.form.setCurrentIndex(max(0, self.form.findData(self.settings.value("form", "woertlich"))))
         self.form.currentIndexChanged.connect(lambda _: self.settings.setValue("form", self.form.currentData()))
-        tb.addWidget(self.form)
-        tb.addWidget(QLabel(" Export als "))
-        tb.addAction(self.act_docx)
-        tb.addAction(self.act_pdf)
-        tb.addSeparator()
-        tb.addAction(self.act_cancel)
+        self.tb.addWidget(self.form)
+        self.tb.addWidget(QLabel(" Export als "))
+        self.tb.addAction(self.act_docx)
+        self.tb.addAction(self.act_pdf)
+        self.tb.addSeparator()
+        self.tb.addAction(self.act_cancel)
 
         # Links: Titel + Sprechernamen
         left = QWidget()
@@ -456,11 +622,13 @@ class MainWindow(QMainWindow):
         self.table.currentCellChanged.connect(self._seek_to_row)
         self.table.addAction(self.act_first_to_prev)
         self.table.addAction(self.act_last_to_next)
+        self.table.addAction(self.act_toggle_smooth_col)
         self.table.addAction(self.act_zoom_in)
         self.table.addAction(self.act_zoom_out)
         self.table.addAction(self.act_zoom_reset)
         self.table.viewport().installEventFilter(self)
         self.addAction(self.act_fullscreen)
+        self.addAction(self.act_toggle_smooth_col)
         self.addAction(self.act_zoom_in)
         self.addAction(self.act_zoom_out)
         self.addAction(self.act_zoom_reset)
@@ -486,11 +654,15 @@ class MainWindow(QMainWindow):
         self.llm_button.setAutoRaise(True)
         self.llm_button.clicked.connect(self.open_settings)
         self.statusBar().addPermanentWidget(self.llm_button)
+        self._last_llm_ok = False
+        self._last_llm_text = ""
+        self._status_worker: QThread | None = None
         self._save_after = False
         self._set_busy(False)
         self.zoom_level = self.settings.value("zoom_level", 100, type=int)
         self.set_zoom(self.zoom_level)
-        QTimer.singleShot(0, self.refresh_llm_status)  # nach dem Anzeigen, damit der Start nicht wartet
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            QTimer.singleShot(0, self.refresh_llm_status)  # nach dem Anzeigen, damit der Start nicht wartet
 
     def _act(self, text, slot, shortcut=None):
         act = QAction(text, self)
@@ -662,7 +834,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, COL_SMOOTH, QTableWidgetItem(p.get("smooth", "")))
             self._mark_suspicious(row)
         self.table.blockSignals(False)
-        self.table.setColumnHidden(COL_SMOOTH, not any(p.get("smooth") for p in paragraphs))
+        self.toggle_smooth_column(any(p.get("smooth") for p in paragraphs))
         self._refresh_combos()
         self.table.resizeRowsToContents()
 
@@ -984,12 +1156,37 @@ class MainWindow(QMainWindow):
             for edit in self.name_edits.values():
                 edit.setFont(zoomed_font)
 
+        if hasattr(self, "menuBar") and self.menuBar():
+            self.menuBar().setFont(zoomed_font)
+            for m in self.menuBar().findChildren(QMenu):
+                m.setFont(zoomed_font)
+
+        if hasattr(self, "tb") and self.tb:
+            self.tb.setFont(zoomed_font)
+            for w in self.tb.findChildren(QWidget):
+                w.setFont(zoomed_font)
+            base_icon = 16
+            icon_sz = max(14, int(round(base_icon * scale)))
+            self.tb.setIconSize(QSize(icon_sz, icon_sz))
+
+        if hasattr(self, "statusBar") and self.statusBar():
+            self.statusBar().setFont(zoomed_font)
+            for w in self.statusBar().findChildren(QWidget):
+                w.setFont(zoomed_font)
+
         self.table.resizeRowsToContents()
         self.table.resizeColumnToContents(COL_TIME)
         self.table.resizeColumnToContents(COL_SPEAKER)
 
         if hasattr(self, "zoom_button"):
             self.zoom_button.setText(f"{self.zoom_level}%")
+
+    def toggle_smooth_column(self, show: bool | None = None):
+        if show is None:
+            show = self.table.isColumnHidden(COL_SMOOTH)
+        self.table.setColumnHidden(COL_SMOOTH, not show)
+        if hasattr(self, "act_toggle_smooth_col"):
+            self.act_toggle_smooth_col.setChecked(show)
 
     def _table_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
@@ -1028,6 +1225,9 @@ class MainWindow(QMainWindow):
         act_del = menu.addAction("Absatz löschen")
         act_del.triggered.connect(lambda: self.delete_row(row))
 
+        menu.addSeparator()
+        menu.addAction(self.act_toggle_smooth_col)
+
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     # ---------- Wiedergabe ----------
@@ -1052,14 +1252,34 @@ class MainWindow(QMainWindow):
         return (self.settings.value("ollama_url", llm.DEFAULT_URL),
                 self.settings.value("ollama_model", llm.DEFAULT_MODEL))
 
-    def refresh_llm_status(self):
+    def refresh_llm_status(self, sync: bool = False):
         url, model = self._llm()
-        ok, text, _ = llm.status(url, model)
-        self.llm_button.setText(f"● Sprachmodell: {model}")
-        ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
-        self.llm_button.setStyleSheet(f"color: {ok_col if ok else err_col}")
-        self.llm_button.setToolTip(f"{text}\nKlicken für Einstellungen.")
-        return ok, text
+        if sync:
+            ok, text, _ = llm.status(url, model)
+            self._last_llm_ok = ok
+            self._last_llm_text = text
+            self.llm_button.setText(f"● Sprachmodell: {model}")
+            ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
+            self.llm_button.setStyleSheet(f"color: {ok_col if ok else err_col}")
+            self.llm_button.setToolTip(f"{text}\nKlicken für Einstellungen.")
+            return ok, text
+
+        self.llm_button.setText(f"● Sprachmodell: {model} …")
+        self.llm_button.setStyleSheet("color: #888888")
+
+        self._status_worker = StatusWorker(url, model, self)
+
+        def on_done(ok, text, _models):
+            self._last_llm_ok = ok
+            self._last_llm_text = text
+            self.llm_button.setText(f"● Sprachmodell: {model}")
+            ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
+            self.llm_button.setStyleSheet(f"color: {ok_col if ok else err_col}")
+            self.llm_button.setToolTip(f"{text}\nKlicken für Einstellungen.")
+
+        self._status_worker.done.connect(on_done)
+        self._status_worker.start()
+        return self._last_llm_ok, self._last_llm_text
 
     def smooth_with_llm(self):
         paragraphs = self._paragraphs()
@@ -1067,13 +1287,13 @@ class MainWindow(QMainWindow):
         if not todo:
             self.status.setText("Alle Absätze sind geglättet. Zum Neu-Glätten die betreffenden Zellen leeren.")
             return
-        ok, text = self.refresh_llm_status()
+        ok, text = self.refresh_llm_status(sync=True)
         if not ok:
             QMessageBox.warning(self, "Sprachmodell nicht bereit", f"{text}\n\nEinstellungen über Strg+, öffnen.")
             return
         url, model = self._llm()
         jobs = [(row, paragraphs[row]["text"]) for row in todo]
-        self.table.setColumnHidden(COL_SMOOTH, False)
+        self.toggle_smooth_column(True)
 
         def job(progress, cancelled, item):
             for i, (row, text) in enumerate(jobs):

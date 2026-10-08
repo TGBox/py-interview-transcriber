@@ -37,7 +37,7 @@ def describe_status(version: str, models: list[str], loaded: list[str], model: s
     return True, f"Ollama {version} · {model} · {state}"
 
 
-def _get(url: str, timeout: float = 2):
+def _get(url: str, timeout: float = 1):
     with _opener.open(url, timeout=timeout) as r:
         return json.load(r)
 
