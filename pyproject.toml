@@ -1,7 +1,27 @@
 [project]
 name = "py-interview-transcriber"
-version = "0.1.1"
+version = "1.0.0"
 description = "A python app to process audio recordings of interviews and create nicely formatted interview transcripts."
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "faster-whisper>=1.1",
+    "pyannote.audio>=4.0",
+    "torch>=2.8",
+    "torchaudio>=2.8",
+    "pyside6>=6.8",
+    "python-docx>=1.1",
+]
+
+[dependency-groups]
+dev = ["pyinstaller>=6.11"]
+
+# CUDA-Build von torch unter Windows (PyPI liefert dort nur CPU). Läuft ohne NVIDIA-GPU trotzdem, nur auf CPU.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
