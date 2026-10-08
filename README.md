@@ -15,10 +15,14 @@ uv run main.py
 
 **Hugging-Face-Token** (für die Sprechererkennung, einmalig): Konto auf <https://huggingface.co> anlegen,
 auf <https://huggingface.co/pyannote/speaker-diarization-community-1> die Bedingungen akzeptieren,
-unter *Settings → Access Tokens* einen **Read**-Token erzeugen und in der App eintragen (*Einstellungen*).
+unter *Settings → Access Tokens* einen **Read**-Token erzeugen und in der App eintragen (*Einstellungen*, Strg+,).
 
-**Ollama** (nur für die Zusammenfassung): <https://ollama.com> installieren, dann `ollama pull qwen3:8b`.
-Anderes Modell → *Einstellungen → Ollama-Modell*.
+**Ollama** (für Glättung per Sprachmodell und Zusammenfassung): <https://ollama.com> installieren, dann
+`ollama pull qwen3:8b`. In *Einstellungen* lassen sich Adresse und Modell wählen (Liste der installierten Modelle);
+der Status steht dort und unten rechts in der Statusleiste (grün = bereit, rot = Problem, Klick öffnet die Einstellungen).
+
+Alle Einstellungen – Token, Ollama-Adresse/-Modell, Sprecheranzahl, Fachbegriffe, zuletzt gewählte Form – werden
+automatisch gespeichert.
 
 ## Ablauf
 
@@ -27,7 +31,11 @@ Anderes Modell → *Einstellungen → Ollama-Modell*.
    (existiert die Datei schon, als `-2`, `-3` …)
 3. Prüfen: Zeile anklicken springt zur Stelle, **Strg+Leertaste** spielt ab/pausiert. Text per Doppelklick korrigieren,
    Sprecher pro Absatz umhängen, Namen links eintragen, **Strg+H** sucht und ersetzt. **Strg+S** speichert das Projekt.
-4. *Form* wählen und als **Word** (Strg+E) oder **PDF** (Strg+Umschalt+E) exportieren
+4. Optional **Mit Sprachmodell glätten** (Strg+G): füllt die Spalte *Geglättet (Sprachmodell)* Absatz für Absatz.
+   Abbrechen jederzeit möglich, ein erneuter Klick setzt bei den leeren Absätzen fort; zum Neu-Glätten Zelle leeren.
+   **Gelb markierte** Absätze weichen in der Länge stark vom Original ab – dort hat das Modell vermutlich gekürzt
+   oder ergänzt, bitte gegenlesen.
+5. *Form* wählen und als **Word** (Strg+E) oder **PDF** (Strg+Umschalt+E) exportieren
 
 Später weiterarbeiten: die `.transkript.json` über *Öffnen* laden.
 
@@ -36,7 +44,8 @@ Später weiterarbeiten: die `.transkript.json` über *Öffnen* laden.
 | Form | Inhalt |
 |---|---|
 | Wörtlich | Alles, wie gesprochen: Füllwörter (äh, ähm), Wiederholungen, Pausen `(...)` ab 3 s, Zeitmarken |
-| Geglättet | Füllwörter, Stottern und Pausenmarken entfernt, Wortlaut sonst unverändert |
+| Geglättet | Regelbasiert: Füllwörter, Stottern und Pausenmarken entfernt, Wortlaut sonst unverändert |
+| Geglättet (Sprachmodell) | Die gegengelesene Spalte aus „Mit Sprachmodell glätten“: zusätzlich Satzbau und Satzzeichen geglättet |
 | Wissenschaftlich | Angelehnt an die einfachen Regeln nach Dresing/Pehl: geglättet, Pausen `(...)`, Zeitmarke `#hh:mm:ss-z#` am Absatzende, Zeilennummern (nur Word) |
 | Sinngemäße Zusammenfassung | Kernaussagen nach Themen, per Ollama erzeugt. **Immer gegenlesen**, Sprachmodelle können Aussagen verfälschen. |
 

@@ -5,22 +5,24 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QAction, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QTextDocument
+from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QTextDocument
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter,
-    QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
 )
 
-from core import FORMS, render, summarize, summary_blocks, to_docx, to_html, fmt_time
+import llm
+from core import FORMS, fmt_time, render, summary_blocks, to_docx, to_html
 
 OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm *.json);;"
                "Alle Dateien (*)")
 PROJECT_SUFFIX = ".transkript.json"
-DEFAULT_OLLAMA_MODEL = "qwen3:8b"
-COL_TIME, COL_SPEAKER, COL_TEXT = range(3)
+COL_TIME, COL_SPEAKER, COL_TEXT, COL_SMOOTH = range(4)
+SUSPICIOUS_BG = QColor(255, 193, 7, 90)  # halbtransparentes Gelb, lesbar in hellem und dunklem Theme
+OK_COLOR, ERR_COLOR = "#2e7d32", "#c62828"
 
 
 def free_path(path: Path) -> Path:
@@ -34,8 +36,9 @@ def free_path(path: Path) -> Path:
 
 
 class Worker(QThread):
-    """Führt fn(progress, cancelled) im Hintergrund aus."""
+    """Führt fn(progress, cancelled, item) im Hintergrund aus; item(x) liefert Teilergebnisse sofort an die GUI."""
     progress = Signal(str, int)
+    item = Signal(object)
     done = Signal(object)
     failed = Signal(str)
 
@@ -46,7 +49,7 @@ class Worker(QThread):
 
     def run(self):
         try:
-            result = self.fn(self.progress.emit, lambda: self.cancel_requested)
+            result = self.fn(self.progress.emit, lambda: self.cancel_requested, self.item.emit)
             if not self.cancel_requested:
                 self.done.emit(result)
         except Exception as e:  # noqa: BLE001 – jeder Fehler soll in der GUI landen, nicht den Thread killen
@@ -84,6 +87,58 @@ class ReplaceDialog(QDialog):
         form.addRow(buttons)
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent, settings: QSettings):
+        super().__init__(parent)
+        self.setWindowTitle("Einstellungen")
+        self.setMinimumWidth(560)
+        form = QFormLayout(self)
+
+        form.addRow(QLabel("<b>Sprechererkennung</b>"))
+        self.token = QLineEdit(settings.value("hf_token", ""), echoMode=QLineEdit.EchoMode.Password)
+        form.addRow("Hugging-Face-Token:", self.token)
+        form.addRow(QLabel("Konto auf huggingface.co → Bedingungen von pyannote/speaker-diarization-community-1 "
+                           "akzeptieren → Settings → Access Tokens → Read-Token erzeugen.", wordWrap=True))
+
+        form.addRow(QLabel("<b>Sprachmodell (Ollama)</b> – für Glättung und Zusammenfassung"))
+        self.url = QLineEdit(settings.value("ollama_url", llm.DEFAULT_URL))
+        self.url.editingFinished.connect(self.check)
+        form.addRow("Adresse:", self.url)
+        self.model = QComboBox(editable=True)
+        self.model.setCurrentText(settings.value("ollama_model", llm.DEFAULT_MODEL))
+        self.model.activated.connect(self.check)
+        refresh = QPushButton("Status prüfen")
+        refresh.clicked.connect(self.check)
+        row = QHBoxLayout()
+        row.addWidget(self.model, 1)
+        row.addWidget(refresh)
+        form.addRow("Modell:", row)
+        self.state = QLabel(wordWrap=True, textInteractionFlags=Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow("Status:", self.state)
+        form.addRow(QLabel("Neues Modell installieren: in der Eingabeaufforderung <code>ollama pull &lt;name&gt;</code>, "
+                           "dann „Status prüfen“.", wordWrap=True))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+        self.check()
+
+    def check(self, *_):
+        current = self.model.currentText().strip()
+        ok, text, models = llm.status(self.url.text(), current)
+        self.model.clear()
+        self.model.addItems(models)
+        self.model.setCurrentText(current)  # auch nicht installierte Namen bleiben eintragbar
+        self.state.setText(f"● {text}")
+        self.state.setStyleSheet(f"color: {OK_COLOR if ok else ERR_COLOR}")
+
+    def save(self, settings: QSettings):
+        settings.setValue("hf_token", self.token.text().strip())
+        settings.setValue("ollama_url", self.url.text().strip() or llm.DEFAULT_URL)
+        settings.setValue("ollama_model", self.model.currentText().strip() or llm.DEFAULT_MODEL)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -108,15 +163,17 @@ class MainWindow(QMainWindow):
         self.act_pdf = self._act("PDF …", lambda: self.export("pdf"), "Ctrl+Shift+E")
         self.act_cancel = self._act("Abbrechen", self.cancel)  # bewusst ohne Esc: würde beim Zelleditieren stundenlange Läufe abbrechen
         self.act_replace = self._act("Suchen und Ersetzen …", self.replace_all, "Ctrl+H")
+        self.act_smooth = self._act("Mit Sprachmodell glätten", self.smooth_with_llm, "Ctrl+G")
+        self.act_smooth.setToolTip("Füllt die Spalte „Geglättet (Sprachmodell)“ für alle noch leeren Absätze.")
 
         # Menü für Seltenes
         m = self.menuBar().addMenu("&Datei")
         for a in (self.act_open, self.act_save, self.act_docx, self.act_pdf):
             m.addAction(a)
-        self.menuBar().addMenu("&Bearbeiten").addAction(self.act_replace)
-        m = self.menuBar().addMenu("&Einstellungen")
-        m.addAction(self._act("Hugging-Face-Token …", self.ask_token))
-        m.addAction(self._act("Ollama-Modell …", self.ask_ollama_model))
+        m = self.menuBar().addMenu("&Bearbeiten")
+        m.addAction(self.act_replace)
+        m.addAction(self.act_smooth)
+        self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
 
         # Toolbar für Häufiges
         tb = self.addToolBar("Aktionen")
@@ -125,7 +182,9 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_save)
         tb.addSeparator()
         tb.addWidget(QLabel(" Sprecher: "))
-        self.spin = QSpinBox(minimum=0, maximum=10, value=2, specialValueText="auto")
+        self.spin = QSpinBox(minimum=0, maximum=10, specialValueText="auto")
+        self.spin.setValue(self.settings.value("num_speakers", 2, type=int))
+        self.spin.valueChanged.connect(lambda v: self.settings.setValue("num_speakers", v))
         self.spin.setToolTip("Bekannte Sprecheranzahl verbessert die Erkennung deutlich. 0 = automatisch.")
         tb.addWidget(self.spin)
         tb.addWidget(QLabel("  Fachbegriffe: "))
@@ -136,11 +195,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.hotwords)
         tb.addSeparator()
         tb.addAction(self.act_play)
+        tb.addAction(self.act_smooth)
         tb.addSeparator()
         tb.addWidget(QLabel(" Form: "))
         self.form = QComboBox()
         for key, label in FORMS.items():
             self.form.addItem(label, key)
+        self.form.setCurrentIndex(max(0, self.form.findData(self.settings.value("form", "woertlich"))))
+        self.form.currentIndexChanged.connect(lambda _: self.settings.setValue("form", self.form.currentData()))
         tb.addWidget(self.form)
         tb.addWidget(QLabel(" Export als "))
         tb.addAction(self.act_docx)
@@ -161,15 +223,18 @@ class MainWindow(QMainWindow):
         lv.addStretch()
 
         # Rechts: Transkript
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Zeit", "Sprecher", "Text"])
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Zeit", "Sprecher", "Text (wörtlich)", "Geglättet (Sprachmodell)"])
         self.table.setWordWrap(True)
         self.table.verticalHeader().hide()
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(COL_TIME, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(COL_SPEAKER, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(COL_TEXT, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(COL_SMOOTH, QHeaderView.ResizeMode.Stretch)
         self.table.setItemDelegateForColumn(COL_TEXT, MultilineDelegate(self.table))
+        self.table.setItemDelegateForColumn(COL_SMOOTH, MultilineDelegate(self.table))
+        self.table.setColumnHidden(COL_SMOOTH, True)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.currentCellChanged.connect(self._seek_to_row)
 
@@ -183,7 +248,12 @@ class MainWindow(QMainWindow):
         self.bar = QProgressBar(maximumWidth=300, visible=False)
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.bar)
+        self.llm_button = QToolButton(autoRaise=True)
+        self.llm_button.clicked.connect(self.open_settings)
+        self.statusBar().addPermanentWidget(self.llm_button)
+        self._save_after = False
         self._set_busy(False)
+        QTimer.singleShot(0, self.refresh_llm_status)  # nach dem Anzeigen, damit der Start nicht wartet
 
     def _act(self, text, slot, shortcut=None):
         act = QAction(text, self)
@@ -204,14 +274,14 @@ class MainWindow(QMainWindow):
             return
         token = self.settings.value("hf_token", "")
         if not token:
-            self.ask_token()
+            self.open_settings()
             token = self.settings.value("hf_token", "")
             if not token:
                 return
         self._pending_audio = Path(path)  # Zustand erst bei Erfolg umstellen, sonst landet das alte Transkript im neuen Projekt
         n, hot = self.spin.value(), self.hotwords.text()
 
-        def job(progress, cancelled):
+        def job(progress, cancelled, _item):
             from transcribe import transcribe  # schwere Importe (torch …) erst hier, damit die GUI sofort startet
             return transcribe(path, token, n, hot, progress, cancelled)
 
@@ -230,11 +300,12 @@ class MainWindow(QMainWindow):
                                 "Text und Sprecher prüfen, dann exportieren.")
 
     # ---------- Hintergrundjobs ----------
-    def _run(self, fn, on_done):
+    def _run(self, fn, on_done, on_item=None, save_after=False):
         # Nur gebundene Methoden verbinden: die laufen sicher im GUI-Thread (Lambdas ggf. im Worker-Thread)
-        self._on_done = on_done
+        self._on_done, self._on_item, self._save_after = on_done, on_item, save_after
         self.worker = Worker(fn)
         self.worker.progress.connect(self._on_progress)
+        self.worker.item.connect(self._dispatch_item)
         self.worker.done.connect(self._dispatch_done)
         self.worker.failed.connect(self._on_failed)
         self.worker.finished.connect(self._on_worker_finished)
@@ -244,8 +315,14 @@ class MainWindow(QMainWindow):
     def _dispatch_done(self, result):
         self._on_done(result)
 
+    def _dispatch_item(self, x):
+        self._on_item(x)
+
     def _on_worker_finished(self):
         self._set_busy(False)
+        if self._save_after and self.dirty and self.project_path:  # auch bei Abbruch: Teilergebnisse sichern
+            self.save_project()
+        self.refresh_llm_status()
 
     def cancel(self):
         if self.worker and self.worker.isRunning():
@@ -266,10 +343,14 @@ class MainWindow(QMainWindow):
         self.bar.setVisible(busy)
         self.act_cancel.setEnabled(busy)
         self.act_open.setEnabled(not busy)
+        # Während eines Laufs nicht editierbar: sonst überschreiben eintreffende Ergebnisse Eingaben
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers if busy else
+                                   QAbstractItemView.EditTrigger.DoubleClicked
+                                   | QAbstractItemView.EditTrigger.EditKeyPressed)
         if not busy and self.worker and self.worker.cancel_requested:
             self.status.setText("Abgebrochen.")
         has_rows = self.table.rowCount() > 0
-        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace):
+        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace, self.act_smooth):
             a.setEnabled(not busy and has_rows)
 
     # ---------- Projekt ----------
@@ -337,7 +418,10 @@ class MainWindow(QMainWindow):
             combo.currentIndexChanged.connect(self._mark_dirty)
             self.table.setCellWidget(row, COL_SPEAKER, combo)
             self.table.setItem(row, COL_TEXT, QTableWidgetItem(p["text"]))
+            self.table.setItem(row, COL_SMOOTH, QTableWidgetItem(p.get("smooth", "")))
+            self._mark_suspicious(row)
         self.table.blockSignals(False)
+        self.table.setColumnHidden(COL_SMOOTH, not any(p.get("smooth") for p in paragraphs))
         self._refresh_combos()
         self.table.resizeRowsToContents()
 
@@ -350,8 +434,21 @@ class MainWindow(QMainWindow):
         self.table.resizeColumnToContents(COL_SPEAKER)
 
     def _on_item_changed(self, item):
+        if item.column() in (COL_TEXT, COL_SMOOTH):
+            self.table.blockSignals(True)  # Hintergrund setzen löst sonst erneut itemChanged aus
+            self._mark_suspicious(item.row())
+            self.table.blockSignals(False)
         self.table.resizeRowToContents(item.row())
         self._mark_dirty()
+
+    def _mark_suspicious(self, row: int):
+        smooth = self.table.item(row, COL_SMOOTH)
+        if smooth.text() and llm.suspicious(self.table.item(row, COL_TEXT).text(), smooth.text()):
+            smooth.setBackground(SUSPICIOUS_BG)
+            smooth.setToolTip("Bitte prüfen: Länge weicht stark vom Original ab – evtl. gekürzt oder ergänzt.")
+        else:
+            smooth.setData(Qt.ItemDataRole.BackgroundRole, None)
+            smooth.setToolTip("")
 
     def _mark_dirty(self, *_):
         self.dirty = True
@@ -364,7 +461,10 @@ class MainWindow(QMainWindow):
         for row in range(self.table.rowCount()):
             start, end = self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)
             speaker = self.table.cellWidget(row, COL_SPEAKER).currentData()
-            out.append({"start": start, "end": end, "speaker": speaker, "text": self.table.item(row, COL_TEXT).text()})
+            p = {"start": start, "end": end, "speaker": speaker, "text": self.table.item(row, COL_TEXT).text()}
+            if smooth := self.table.item(row, COL_SMOOTH).text():
+                p["smooth"] = smooth
+            out.append(p)
         return out
 
     def replace_all(self):
@@ -374,11 +474,11 @@ class MainWindow(QMainWindow):
         pattern = re.compile(re.escape(dlg.find.text()), 0 if dlg.case.isChecked() else re.IGNORECASE)
         total = 0
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, COL_TEXT)
-            new, n = pattern.subn(lambda _: dlg.repl.text(), item.text())  # lambda: Ersatz wörtlich, ohne \1-Deutung
-            if n:
-                item.setText(new)
-                total += n
+            for item in (self.table.item(row, COL_TEXT), self.table.item(row, COL_SMOOTH)):
+                new, n = pattern.subn(lambda _: dlg.repl.text(), item.text())  # lambda: Ersatz wörtlich, ohne \1
+                if n:
+                    item.setText(new)
+                    total += n
         self.status.setText(f"{total} Stelle(n) ersetzt.")
 
     # ---------- Wiedergabe ----------
@@ -398,9 +498,64 @@ class MainWindow(QMainWindow):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.act_play.setText("⏸ Pause" if playing else "▶ Abspielen")
 
+    # ---------- Sprachmodell ----------
+    def _llm(self) -> tuple[str, str]:
+        return (self.settings.value("ollama_url", llm.DEFAULT_URL),
+                self.settings.value("ollama_model", llm.DEFAULT_MODEL))
+
+    def refresh_llm_status(self):
+        url, model = self._llm()
+        ok, text, _ = llm.status(url, model)
+        self.llm_button.setText(f"● Sprachmodell: {model}")
+        self.llm_button.setStyleSheet(f"color: {OK_COLOR if ok else ERR_COLOR}")
+        self.llm_button.setToolTip(f"{text}\nKlicken für Einstellungen.")
+        return ok, text
+
+    def smooth_with_llm(self):
+        paragraphs = self._paragraphs()
+        todo = llm.needs_smoothing(paragraphs)
+        if not todo:
+            self.status.setText("Alle Absätze sind geglättet. Zum Neu-Glätten die betreffenden Zellen leeren.")
+            return
+        ok, text = self.refresh_llm_status()
+        if not ok:
+            QMessageBox.warning(self, "Sprachmodell nicht bereit", f"{text}\n\nEinstellungen über Strg+, öffnen.")
+            return
+        url, model = self._llm()
+        jobs = [(row, paragraphs[row]["text"]) for row in todo]
+        self.table.setColumnHidden(COL_SMOOTH, False)
+
+        def job(progress, cancelled, item):
+            for i, (row, text) in enumerate(jobs):
+                if cancelled():
+                    return None
+                progress(f"Glätte Absatz {i + 1} von {len(jobs)} mit {model} …", int(i / len(jobs) * 100))
+                item((row, llm.smooth(text, url, model)))
+            return len(jobs)
+
+        self._run(job, self._on_smooth_done, on_item=self._on_smoothed, save_after=True)
+
+    def _on_smoothed(self, row_text):
+        row, text = row_text
+        self.table.item(row, COL_SMOOTH).setText(text)  # löst itemChanged aus → Markierung + dirty
+
+    def _on_smooth_done(self, count):
+        flagged = sum(1 for p in self._paragraphs() if p.get("smooth") and llm.suspicious(p["text"], p["smooth"]))
+        self.status.setText(f"{count} Absätze geglättet." + (f" {flagged} gelb markiert – bitte prüfen." if flagged else ""))
+
+    def open_settings(self):
+        dlg = SettingsDialog(self, self.settings)
+        if dlg.exec():
+            dlg.save(self.settings)
+        self.refresh_llm_status()
+
     # ---------- Export ----------
     def export(self, kind: str):
         form = self.form.currentData()
+        if form == "geglaettet_llm" and (missing := llm.needs_smoothing(self._paragraphs())):
+            QMessageBox.information(self, "Noch nicht geglättet", f"{len(missing)} Absätze haben noch keine Glättung "
+                                    "durch das Sprachmodell. Zuerst „Mit Sprachmodell glätten“ ausführen.")
+            return
         title = self.title_edit.text().strip() or "Interview"
         base = self.project_path.parent if self.project_path else Path.home()
         default = str(base / f"{title} – {FORMS[form]}.{kind}".replace("/", "-"))
@@ -410,11 +565,11 @@ class MainWindow(QMainWindow):
             return
         paragraphs, names = self._paragraphs(), self._names()
         if form == "zusammenfassung":
-            model = self.settings.value("ollama_model", DEFAULT_OLLAMA_MODEL)
+            url, model = self._llm()
 
-            def job(progress, cancelled):
+            def job(progress, cancelled, _item):
                 progress(f"Fasse mit {model} zusammen (kann einige Minuten dauern) …", -1)
-                return summarize(paragraphs, names, model)
+                return llm.summarize(paragraphs, names, url, model)
 
             self._run(job, lambda md: self._write(path, kind, summary_blocks(title, md)))
         else:
@@ -439,27 +594,7 @@ class MainWindow(QMainWindow):
             return
         self.status.setText(f"Exportiert: {path}")
 
-    # ---------- Einstellungen & Schließen ----------
-    def ask_token(self):
-        token, ok = QInputDialog.getText(
-            self, "Hugging-Face-Token",
-            "Token für die Sprechererkennung (einmalig nötig).\n"
-            "1. Konto auf huggingface.co anlegen\n"
-            "2. Bedingungen von pyannote/speaker-diarization-community-1 akzeptieren\n"
-            "3. Unter Settings → Access Tokens einen Read-Token erzeugen",
-            QLineEdit.EchoMode.Password, self.settings.value("hf_token", ""),
-        )
-        if ok:
-            self.settings.setValue("hf_token", token.strip())
-
-    def ask_ollama_model(self):
-        model, ok = QInputDialog.getText(
-            self, "Ollama-Modell", "Modell für die Zusammenfassung (vorher: ollama pull <modell>):",
-            text=self.settings.value("ollama_model", DEFAULT_OLLAMA_MODEL),
-        )
-        if ok and model.strip():
-            self.settings.setValue("ollama_model", model.strip())
-
+    # ---------- Schließen ----------
     def _confirm_discard(self) -> bool:
         if self.worker and self.worker.isRunning():
             QMessageBox.information(self, "Läuft noch", "Bitte warten oder zuerst „Abbrechen“ klicken.")
@@ -489,7 +624,12 @@ class MainWindow(QMainWindow):
             return
         if running:
             self.worker.cancel_requested = True
-            if not self.worker.wait(10_000):  # Modell-Laden/Ollama-Request sind nicht unterbrechbar
+            finished = self.worker.wait(10_000)  # Modell-Laden/Ollama-Request sind nicht unterbrechbar
+            if self._save_after:
+                QApplication.processEvents()  # noch eingetroffene Glättungen in die Tabelle übernehmen
+                if self.dirty and self.project_path:
+                    self.save_project()
+            if not finished:
                 os._exit(0)  # QThread.terminate() kann mit gehaltenem GIL hängen; Worker schreibt keine Dateien
         event.accept()
 
