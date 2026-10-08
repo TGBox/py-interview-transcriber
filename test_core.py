@@ -166,5 +166,20 @@ class SummaryBlocks(unittest.TestCase):
                                                     ("li", "Punkt zwei"), ("text", "Fazit.")])
 
 
+class SpeakerDisplayName(unittest.TestCase):
+    def test_converts_technical_ids(self):
+        from core import speaker_display_name
+        self.assertEqual(speaker_display_name("SPEAKER_00"), "Sprecher 1")
+        self.assertEqual(speaker_display_name("SPEAKER_01"), "Sprecher 2")
+        self.assertEqual(speaker_display_name("speaker_02"), "Sprecher 3")
+        self.assertEqual(speaker_display_name("SPK_00"), "Sprecher 1")
+
+    def test_preserves_custom_names(self):
+        from core import speaker_display_name
+        self.assertEqual(speaker_display_name("Markus"), "Markus")
+        self.assertEqual(speaker_display_name("Interviewer:in"), "Interviewer:in")
+
+
 if __name__ == "__main__":
     unittest.main()
+

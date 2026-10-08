@@ -71,5 +71,24 @@ class TestMainWindowEditing(unittest.TestCase):
         self.win.toggle_fullscreen()
         self.assertFalse(self.win.isFullScreen())
 
+    def test_german_speaker_labels(self):
+        # When _fill is called, names_form labels should be in German (e.g. "Sprecher 1:")
+        self.win._fill(self.paragraphs)
+        lbl0 = self.win.names_form.itemAt(0, self.win.names_form.ItemRole.LabelRole).widget().text()
+        lbl1 = self.win.names_form.itemAt(1, self.win.names_form.ItemRole.LabelRole).widget().text()
+        self.assertEqual(lbl0, "Sprecher 1:")
+        self.assertEqual(lbl1, "Sprecher 2:")
+        self.assertEqual(self.win.name_edits["SPEAKER_00"].placeholderText(), "Sprecher 1")
+
+    def test_dark_mode_toggle(self):
+        self.win.toggle_dark_mode(True)
+        self.assertTrue(self.win.settings.value("dark_mode", type=bool))
+        self.assertTrue(self.win.act_dark_mode.isChecked())
+        self.win.toggle_dark_mode(False)
+        self.assertFalse(self.win.settings.value("dark_mode", type=bool))
+        self.assertFalse(self.win.act_dark_mode.isChecked())
+
+
 if __name__ == "__main__":
     unittest.main()
+

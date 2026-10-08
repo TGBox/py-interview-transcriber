@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QTextDocument
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPageLayout, QPageSize, QPalette, QPdfWriter, QTextDocument
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
@@ -15,14 +15,113 @@ from PySide6.QtWidgets import (
 )
 
 import llm
-from core import FORMS, fmt_time, realign_paragraph_boundaries, render, split_first_sentence, split_last_sentence, summary_blocks, to_docx, to_html
+from core import FORMS, fmt_time, realign_paragraph_boundaries, render, speaker_display_name, split_first_sentence, split_last_sentence, summary_blocks, to_docx, to_html
 
 OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm *.json);;"
                "Alle Dateien (*)")
 PROJECT_SUFFIX = ".transkript.json"
 COL_TIME, COL_SPEAKER, COL_TEXT, COL_SMOOTH = range(4)
 SUSPICIOUS_BG = QColor(255, 193, 7, 90)  # halbtransparentes Gelb, lesbar in hellem und dunklem Theme
-OK_COLOR, ERR_COLOR = "#2e7d32", "#c62828"
+
+DARK_STYLESHEET = """
+QToolTip {
+    background-color: #252526;
+    color: #e0e0e0;
+    border: 1px solid #3f3f46;
+    padding: 4px;
+}
+QHeaderView::section {
+    background-color: #252526;
+    color: #e0e0e0;
+    padding: 4px;
+    border: 1px solid #333333;
+}
+QTableWidget {
+    gridline-color: #333333;
+    selection-background-color: #0e639c;
+    selection-color: #ffffff;
+}
+QComboBox, QLineEdit, QSpinBox, QPlainTextEdit {
+    background-color: #252526;
+    color: #e0e0e0;
+    border: 1px solid #3f3f46;
+    border-radius: 3px;
+    padding: 3px 6px;
+}
+QComboBox:hover, QLineEdit:hover, QSpinBox:hover, QPlainTextEdit:hover {
+    border-color: #0e639c;
+}
+QPushButton {
+    background-color: #333333;
+    color: #e0e0e0;
+    border: 1px solid #3f3f46;
+    border-radius: 3px;
+    padding: 4px 12px;
+}
+QPushButton:hover {
+    background-color: #3e3e42;
+    border-color: #0e639c;
+}
+QPushButton:pressed {
+    background-color: #1e1e1e;
+}
+QToolBar {
+    border-bottom: 1px solid #333333;
+    spacing: 4px;
+}
+QStatusBar {
+    border-top: 1px solid #333333;
+}
+"""
+
+
+def dark_palette() -> QPalette:
+    pal = QPalette()
+    bg = QColor(30, 30, 30)
+    base = QColor(37, 37, 38)
+    alt_base = QColor(45, 45, 48)
+    text = QColor(220, 220, 220)
+    btn = QColor(45, 45, 48)
+    highlight = QColor(14, 99, 156)
+    highlight_text = QColor(255, 255, 255)
+    disabled_text = QColor(128, 128, 128)
+
+    pal.setColor(QPalette.ColorRole.Window, bg)
+    pal.setColor(QPalette.ColorRole.WindowText, text)
+    pal.setColor(QPalette.ColorRole.Base, base)
+    pal.setColor(QPalette.ColorRole.AlternateBase, alt_base)
+    pal.setColor(QPalette.ColorRole.ToolTipBase, base)
+    pal.setColor(QPalette.ColorRole.ToolTipText, text)
+    pal.setColor(QPalette.ColorRole.Text, text)
+    pal.setColor(QPalette.ColorRole.Button, btn)
+    pal.setColor(QPalette.ColorRole.ButtonText, text)
+    pal.setColor(QPalette.ColorRole.Highlight, highlight)
+    pal.setColor(QPalette.ColorRole.HighlightedText, highlight_text)
+    pal.setColor(QPalette.ColorRole.Link, QColor(86, 156, 214))
+
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(60, 60, 60))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, disabled_text)
+    return pal
+
+
+def set_theme(dark: bool):
+    app = QApplication.instance()
+    if not app:
+        return
+    app.setStyle("Fusion")
+    if dark:
+        app.setPalette(dark_palette())
+        app.setStyleSheet(DARK_STYLESHEET)
+    else:
+        app.setPalette(app.style().standardPalette())
+        app.setStyleSheet("")
+
+
+def status_colors(dark: bool = False) -> tuple[str, str]:
+    return ("#66bb6a", "#ef5350") if dark else ("#2e7d32", "#c62828")
 
 
 def free_path(path: Path) -> Path:
@@ -99,11 +198,12 @@ class SplitDialog(QDialog):
         self.setMinimumSize(520, 260)
         v = QVBoxLayout(self)
         v.addWidget(QLabel("Cursor an die gewünschte Trennstelle setzen und <b>Hier teilen</b> klicken:<br>"
-                           "<small style='color:#666'>Tipp: Im Hauptfenster genügt Strg+Eingabe während des Editierens.</small>"))
+                           "<small style='color:#888'>Tipp: Im Hauptfenster genügt Strg+Eingabe während des Editierens.</small>"))
         self.editor = QPlainTextEdit(text)
         v.addWidget(self.editor)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox()
         btn_split = buttons.addButton("Hier teilen", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_cancel = buttons.addButton("Abbrechen", QDialogButtonBox.ButtonRole.RejectRole)
         btn_split.setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -123,8 +223,10 @@ class ReplaceDialog(QDialog):
         form.addRow("Suchen:", self.find)
         form.addRow("Ersetzen durch:", self.repl)
         form.addRow(self.case)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
-        buttons.addButton("Alle ersetzen", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons = QDialogButtonBox()
+        btn_replace = buttons.addButton("Alle ersetzen", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_cancel = buttons.addButton("Abbrechen", QDialogButtonBox.ButtonRole.RejectRole)
+        btn_replace.setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -136,6 +238,14 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Einstellungen")
         self.setMinimumWidth(560)
         form = QFormLayout(self)
+
+        form.addRow(QLabel("<b>Erscheinungsbild</b>"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Helles Design", False)
+        self.theme_combo.addItem("Dunkles Design", True)
+        self.theme_combo.setCurrentIndex(1 if settings.value("dark_mode", False, type=bool) else 0)
+        self.theme_combo.currentIndexChanged.connect(self.check)
+        form.addRow("Farbschema:", self.theme_combo)
 
         form.addRow(QLabel("<b>Sprechererkennung</b>"))
         self.token = QLineEdit(settings.value("hf_token", ""))
@@ -169,7 +279,10 @@ class SettingsDialog(QDialog):
         lbl_ollama.setWordWrap(True)
         form.addRow(lbl_ollama)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox()
+        btn_save = buttons.addButton("Speichern", QDialogButtonBox.ButtonRole.AcceptRole)
+        btn_cancel = buttons.addButton("Abbrechen", QDialogButtonBox.ButtonRole.RejectRole)
+        btn_save.setDefault(True)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         form.addRow(buttons)
@@ -182,9 +295,11 @@ class SettingsDialog(QDialog):
         self.model.addItems(models)
         self.model.setCurrentText(current)  # auch nicht installierte Namen bleiben eintragbar
         self.state.setText(f"● {text}")
-        self.state.setStyleSheet(f"color: {OK_COLOR if ok else ERR_COLOR}")
+        ok_col, err_col = status_colors(self.theme_combo.currentData())
+        self.state.setStyleSheet(f"color: {ok_col if ok else err_col}")
 
     def save(self, settings: QSettings):
+        settings.setValue("dark_mode", self.theme_combo.currentData())
         settings.setValue("hf_token", self.token.text().strip())
         settings.setValue("ollama_url", self.url.text().strip() or llm.DEFAULT_URL)
         settings.setValue("ollama_model", self.model.currentText().strip() or llm.DEFAULT_MODEL)
@@ -225,6 +340,9 @@ class MainWindow(QMainWindow):
                                           lambda: self.move_last_sentence_to_next(self.table.currentRow()),
                                           "Ctrl+Shift+Down")
         self.act_fullscreen = self._act("Vollbildmodus", self.toggle_fullscreen, "F11")
+        self.act_dark_mode = self._act("Dunkles Design", self.toggle_dark_mode, "Ctrl+D")
+        self.act_dark_mode.setCheckable(True)
+        self.act_dark_mode.setChecked(self.settings.value("dark_mode", False, type=bool))
 
         # Menü für Seltenes
         m = self.menuBar().addMenu("&Datei")
@@ -238,6 +356,7 @@ class MainWindow(QMainWindow):
         m_edit.addAction(self.act_first_to_prev)
         m_edit.addAction(self.act_last_to_next)
         m_view = self.menuBar().addMenu("&Ansicht")
+        m_view.addAction(self.act_dark_mode)
         m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
 
@@ -477,12 +596,13 @@ class MainWindow(QMainWindow):
             self.names_form.removeRow(0)
         self.name_edits = {}
         for i, label in enumerate(labels):
-            default = "Interviewer:in" if i == 0 else "Befragte:r" if len(labels) == 2 else f"Person {i}"
+            disp = speaker_display_name(label)
+            default = "Interviewer:in" if i == 0 else "Befragte:r" if len(labels) == 2 else f"Person {i + 1}"
             edit = QLineEdit((names or {}).get(label, default))
-            edit.setPlaceholderText(label)
+            edit.setPlaceholderText(disp)
             edit.textEdited.connect(self._refresh_combos)
             edit.textEdited.connect(self._mark_dirty)
-            self.names_form.addRow(f"{label}:", edit)
+            self.names_form.addRow(f"{disp}:", edit)
             self.name_edits[label] = edit
 
         self.table.blockSignals(True)
@@ -495,7 +615,7 @@ class MainWindow(QMainWindow):
             self.table.setItem(row, COL_TIME, t)
             combo = QComboBox()
             for label in labels:
-                combo.addItem(label, label)
+                combo.addItem(names.get(label, speaker_display_name(label)) if names else speaker_display_name(label), label)
             combo.setCurrentIndex(labels.index(p["speaker"]))
             combo.currentIndexChanged.connect(self._mark_dirty)
             self.table.setCellWidget(row, COL_SPEAKER, combo)
@@ -511,8 +631,11 @@ class MainWindow(QMainWindow):
         names = self._names()
         for row in range(self.table.rowCount()):
             combo = self.table.cellWidget(row, COL_SPEAKER)
+            if not combo:
+                continue
             for i in range(combo.count()):
-                combo.setItemText(i, names[combo.itemData(i)])
+                data = combo.itemData(i)
+                combo.setItemText(i, names.get(data, speaker_display_name(str(data))))
         self.table.resizeColumnToContents(COL_SPEAKER)
 
     def _on_item_changed(self, item):
@@ -536,7 +659,7 @@ class MainWindow(QMainWindow):
         self.dirty = True
 
     def _names(self) -> dict[str, str]:
-        return {label: e.text().strip() or label for label, e in self.name_edits.items()}
+        return {label: e.text().strip() or speaker_display_name(label) for label, e in self.name_edits.items()}
 
     def _paragraphs(self) -> list[dict]:
         out = []
@@ -569,8 +692,15 @@ class MainWindow(QMainWindow):
 
     def delete_row(self, row: int):
         if 0 <= row < self.table.rowCount():
-            if QMessageBox.question(self, "Absatz löschen", "Diesen Absatz wirklich löschen?") \
-                    == QMessageBox.StandardButton.Yes:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Absatz löschen")
+            msg.setText("Diesen Absatz wirklich löschen?")
+            msg.setIcon(QMessageBox.Icon.Question)
+            btn_delete = msg.addButton("Löschen", QMessageBox.ButtonRole.YesRole)
+            btn_cancel = msg.addButton("Abbrechen", QMessageBox.ButtonRole.NoRole)
+            msg.setDefaultButton(btn_cancel)
+            msg.exec()
+            if msg.clickedButton() == btn_delete:
                 self._remove_row(row)
                 self._mark_dirty()
                 self.status.setText("Absatz gelöscht.")
@@ -632,7 +762,7 @@ class MainWindow(QMainWindow):
         combo = QComboBox()
         names = self._names()
         for label in all_speakers:
-            combo.addItem(names.get(label, label), label)
+            combo.addItem(names.get(label, speaker_display_name(label)), label)
         if next_speaker in all_speakers:
             combo.setCurrentIndex(all_speakers.index(next_speaker))
         combo.currentIndexChanged.connect(self._mark_dirty)
@@ -761,6 +891,14 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
             self.act_fullscreen.setText("Fenstermodus")
 
+    def toggle_dark_mode(self, checked: bool | None = None):
+        if checked is None:
+            checked = not self.settings.value("dark_mode", False, type=bool)
+        self.settings.setValue("dark_mode", checked)
+        self.act_dark_mode.setChecked(checked)
+        set_theme(checked)
+        self.refresh_llm_status()
+
     def _table_context_menu(self, pos):
         row = self.table.rowAt(pos.y())
         if row < 0:
@@ -826,7 +964,8 @@ class MainWindow(QMainWindow):
         url, model = self._llm()
         ok, text, _ = llm.status(url, model)
         self.llm_button.setText(f"● Sprachmodell: {model}")
-        self.llm_button.setStyleSheet(f"color: {OK_COLOR if ok else ERR_COLOR}")
+        ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
+        self.llm_button.setStyleSheet(f"color: {ok_col if ok else err_col}")
         self.llm_button.setToolTip(f"{text}\nKlicken für Einstellungen.")
         return ok, text
 
@@ -866,6 +1005,7 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self, self.settings)
         if dlg.exec():
             dlg.save(self.settings)
+            self.toggle_dark_mode(self.settings.value("dark_mode", False, type=bool))
         self.refresh_llm_status()
 
     # ---------- Export ----------
@@ -923,21 +1063,35 @@ class MainWindow(QMainWindow):
     def _confirm_unsaved(self) -> bool:
         if not self.dirty:
             return True
-        answer = QMessageBox.question(
-            self, "Ungespeicherte Änderungen", "Änderungen am Transkript speichern?",
-            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-        )
-        if answer == QMessageBox.StandardButton.Save:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Ungespeicherte Änderungen")
+        msg.setText("Änderungen am Transkript speichern?")
+        msg.setIcon(QMessageBox.Icon.Question)
+        btn_save = msg.addButton("Speichern", QMessageBox.ButtonRole.AcceptRole)
+        btn_discard = msg.addButton("Verwerfen", QMessageBox.ButtonRole.DestructiveRole)
+        btn_cancel = msg.addButton("Abbrechen", QMessageBox.ButtonRole.RejectRole)
+        msg.setDefaultButton(btn_save)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_save:
             self.save_project()
             return not self.dirty
-        return answer == QMessageBox.StandardButton.Discard
+        return clicked == btn_discard
 
     def closeEvent(self, event):
         running = self.worker and self.worker.isRunning()
-        if running and QMessageBox.question(self, "Läuft noch", "Verarbeitung abbrechen und beenden?") \
-                != QMessageBox.StandardButton.Yes:
-            event.ignore()
-            return
+        if running:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Läuft noch")
+            msg.setText("Verarbeitung abbrechen und beenden?")
+            msg.setIcon(QMessageBox.Icon.Question)
+            btn_yes = msg.addButton("Ja, beenden", QMessageBox.ButtonRole.YesRole)
+            btn_no = msg.addButton("Nein, weiterlaufen lassen", QMessageBox.ButtonRole.NoRole)
+            msg.setDefaultButton(btn_no)
+            msg.exec()
+            if msg.clickedButton() != btn_yes:
+                event.ignore()
+                return
         if not self._confirm_unsaved():
             event.ignore()
             return
@@ -955,6 +1109,8 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    settings = QSettings("Carasent", "InterviewTranscriber")
+    set_theme(settings.value("dark_mode", False, type=bool))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

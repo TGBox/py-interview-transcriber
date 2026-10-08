@@ -160,11 +160,19 @@ def fmt_time(seconds: float, tenths: bool = False) -> str:
     return f"{hms}-{t % 10}" if tenths else hms
 
 
+def speaker_display_name(label: str) -> str:
+    """Wandelt technische Bezeichner wie SPEAKER_00 in sprechende deutsche Namen um."""
+    m = re.match(r"^(?:SPEAKER|SPK)[_ -]?(\d+)$", label, re.IGNORECASE)
+    if m:
+        return f"Sprecher {int(m.group(1)) + 1}"
+    return label
+
+
 def render(title: str, paragraphs: list[dict], names: dict[str, str], form: str) -> list[Block]:
     """Absätze in Blöcke der gewählten Form umwandeln (nicht für 'zusammenfassung')."""
     blocks: list[Block] = [("h1", title)]
     for p in paragraphs:
-        name = names.get(p["speaker"], p["speaker"])
+        name = names.get(p["speaker"], speaker_display_name(p["speaker"]))
         if form == "woertlich":
             blocks.append(("p", fmt_time(p["start"]), name, p["text"]))
         elif form == "geglaettet":
