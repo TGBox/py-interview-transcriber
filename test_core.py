@@ -1,6 +1,6 @@
 import unittest
 
-from core import assign_speakers, fmt_time, merge_paragraphs, to_html
+from core import PAUSE, assign_speakers, clean_text, fmt_time, merge_paragraphs, render, summary_blocks, to_html
 
 
 class AssignSpeakers(unittest.TestCase):
@@ -28,22 +28,87 @@ class MergeParagraphs(unittest.TestCase):
         self.assertEqual([(p["speaker"], p["text"], p["start"], p["end"]) for p in out],
                          [("A", "Eins. Zwei.", 0, 2), ("B", "Drei.", 2, 3), ("A", "Vier.", 3, 4)])
 
+    def test_marks_long_pause_within_speaker(self):
+        items = [{"start": 0, "end": 1, "speaker": "A", "text": "Also"},
+                 {"start": 4.5, "end": 5, "speaker": "A", "text": "ja."}]
+        self.assertEqual(merge_paragraphs(items)[0]["text"], f"Also {PAUSE} ja.")
+
+    def test_short_gap_no_pause(self):
+        items = [{"start": 0, "end": 1, "speaker": "A", "text": "Also"},
+                 {"start": 2.9, "end": 3, "speaker": "A", "text": "ja."}]
+        self.assertEqual(merge_paragraphs(items)[0]["text"], "Also ja.")
+
     def test_empty(self):
         self.assertEqual(merge_paragraphs([]), [])
+
+
+class CleanText(unittest.TestCase):
+    def test_removes_fillers_and_fixes_commas(self):
+        self.assertEqual(clean_text("Äh, also ich, ähm, weiß nicht."), "Also ich weiß nicht.")
+
+    def test_removes_stutter_repetition(self):
+        self.assertEqual(clean_text("Ich ich ich finde das gut."), "Ich finde das gut.")
+
+    def test_keeps_legit_german_doublings(self):
+        for s in ("Kinder, die die Lehrer mögen.", "Haben Sie sie gesehen?", "Ich weiß, dass das stimmt.",
+                  "Das, was das Team will."):
+            self.assertEqual(clean_text(s), s)
+
+    def test_abbreviations_do_not_capitalize(self):
+        self.assertEqual(clean_text("Das ist z. B. das Beste, bzw. das Zweitbeste. danach"),
+                         "Das ist z. B. das Beste, bzw. das Zweitbeste. Danach")
+
+    def test_keeps_mhm_answer_and_eh_word(self):
+        self.assertEqual(clean_text("Mhm. Das ist eh klar."), "Mhm. Das ist eh klar.")
+
+    def test_pauses_removed_or_kept(self):
+        self.assertEqual(clean_text(f"Also {PAUSE} gut."), "Also gut.")
+        self.assertEqual(clean_text(f"Also {PAUSE} gut.", keep_pauses=True), f"Also {PAUSE} gut.")
+
+    def test_only_filler_becomes_empty(self):
+        self.assertEqual(clean_text("Ähm."), "")
 
 
 class Format(unittest.TestCase):
     def test_fmt_time(self):
         self.assertEqual(fmt_time(3725.9), "01:02:05")
+        self.assertEqual(fmt_time(83.46, tenths=True), "00:01:23-4")
 
     def test_html_uses_names_and_escapes(self):
-        html = to_html("Titel <1>", [{"start": 65, "end": 70, "speaker": "SPEAKER_00", "text": "a < b & c"}],
-                       {"SPEAKER_00": "Frau Müller"})
+        blocks = render("Titel <1>", [{"start": 65, "end": 70, "speaker": "SPEAKER_00", "text": "a < b & c"}],
+                        {"SPEAKER_00": "Frau Müller"}, "woertlich")
+        html = to_html(blocks)
         self.assertIn("Frau Müller", html)
         self.assertIn("a &lt; b &amp; c", html)
         self.assertIn("Titel &lt;1&gt;", html)
         self.assertIn("00:01:05", html)
         self.assertNotIn("SPEAKER_00", html)
+
+
+class Render(unittest.TestCase):
+    P = [{"start": 83.46, "end": 90.0, "speaker": "S0", "text": f"Ähm, ich {PAUSE} finde das gut."},
+         {"start": 91.0, "end": 92.0, "speaker": "S1", "text": "Äh."}]
+    N = {"S0": "B", "S1": "I"}
+
+    def test_woertlich_keeps_everything(self):
+        b = render("T", self.P, self.N, "woertlich")
+        self.assertEqual(b[1], ("p", "00:01:23", "B", f"Ähm, ich {PAUSE} finde das gut."))
+        self.assertEqual(len(b), 3)
+
+    def test_geglaettet_cleans_and_drops_empty(self):
+        b = render("T", self.P, self.N, "geglaettet")
+        self.assertEqual(b[1:], [("p", "00:01:23", "B", "Ich finde das gut.")])
+
+    def test_wissenschaftlich_dresing_style(self):
+        b = render("T", self.P, self.N, "wissenschaftlich")
+        self.assertEqual(b[1:], [("p", None, "B", f"Ich {PAUSE} finde das gut. #00:01:30-0#")])
+
+
+class SummaryBlocks(unittest.TestCase):
+    def test_parses_markdown_subset(self):
+        md = "## Thema A\n- **Punkt** eins\n* Punkt zwei\n\nFazit."
+        self.assertEqual(summary_blocks("T", md), [("h1", "T"), ("h2", "Thema A"), ("li", "Punkt eins"),
+                                                    ("li", "Punkt zwei"), ("text", "Fazit.")])
 
 
 if __name__ == "__main__":

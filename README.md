@@ -1,8 +1,10 @@
 # py-interview-transcriber
 
-Wandelt Interview-Aufnahmen lokal in formatierte Transkripte (Word/PDF) um.
-Transkription: faster-whisper (`large-v3-turbo`, Deutsch) · Sprechererkennung: pyannote `speaker-diarization-community-1`.
-Kein Audio verlässt den Rechner (nur die Modelle werden beim ersten Start einmalig von Hugging Face geladen).
+Wandelt Interview-Aufnahmen lokal in formatierte Transkripte um (Word/PDF).
+Transkription: faster-whisper (`large-v3-turbo`, Deutsch, wortgenaue Zeitmarken) · Sprechererkennung: pyannote
+`speaker-diarization-community-1` · Zusammenfassung: lokales Sprachmodell über Ollama.
+Weder Audio noch Text verlassen den Rechner (nur die Modelle werden beim ersten Start einmalig heruntergeladen;
+die pyannote-Telemetrie ist abgeschaltet).
 
 ## Einrichtung
 
@@ -11,20 +13,35 @@ uv sync
 uv run main.py
 ```
 
-Beim ersten Öffnen einer Datei fragt die App nach einem Hugging-Face-Token:
+**Hugging-Face-Token** (für die Sprechererkennung, einmalig): Konto auf <https://huggingface.co> anlegen,
+auf <https://huggingface.co/pyannote/speaker-diarization-community-1> die Bedingungen akzeptieren,
+unter *Settings → Access Tokens* einen **Read**-Token erzeugen und in der App eintragen (*Einstellungen*).
 
-1. Konto auf <https://huggingface.co> anlegen
-2. Auf <https://huggingface.co/pyannote/speaker-diarization-community-1> die Bedingungen akzeptieren
-3. Unter *Settings → Access Tokens* einen **Read**-Token erzeugen und in der App eintragen
-
-Der Token wird in der Windows-Registry (QSettings) gespeichert.
+**Ollama** (nur für die Zusammenfassung): <https://ollama.com> installieren, dann `ollama pull qwen3:8b`.
+Anderes Modell → *Einstellungen → Ollama-Modell*.
 
 ## Ablauf
 
-1. **Audio öffnen** (Strg+O) – vorher *Anzahl Sprecher* setzen (bei Interviews meist 2, verbessert die Erkennung deutlich)
-2. Warten (mit NVIDIA-GPU ca. 1/10 der Audiolänge, nur CPU deutlich länger)
-3. Sprechernamen links eintragen, Text per Doppelklick korrigieren, falsch zugeordnete Absätze über die Sprecher-Auswahl umhängen
-4. **Als Word** (Strg+S) oder **als PDF** (Strg+P) exportieren
+1. *Sprecher* (bei Interviews meist 2) und ggf. *Fachbegriffe* (Namen, Produkte, Abkürzungen) setzen
+2. **Öffnen** (Strg+O) – Audio-/Videodatei. Das Ergebnis wird automatisch als `<audio>.transkript.json` gespeichert
+   (existiert die Datei schon, als `-2`, `-3` …)
+3. Prüfen: Zeile anklicken springt zur Stelle, **Strg+Leertaste** spielt ab/pausiert. Text per Doppelklick korrigieren,
+   Sprecher pro Absatz umhängen, Namen links eintragen, **Strg+H** sucht und ersetzt. **Strg+S** speichert das Projekt.
+4. *Form* wählen und als **Word** (Strg+E) oder **PDF** (Strg+Umschalt+E) exportieren
+
+Später weiterarbeiten: die `.transkript.json` über *Öffnen* laden.
+
+## Ausgabeformen
+
+| Form | Inhalt |
+|---|---|
+| Wörtlich | Alles, wie gesprochen: Füllwörter (äh, ähm), Wiederholungen, Pausen `(...)` ab 3 s, Zeitmarken |
+| Geglättet | Füllwörter, Stottern und Pausenmarken entfernt, Wortlaut sonst unverändert |
+| Wissenschaftlich | Angelehnt an die einfachen Regeln nach Dresing/Pehl: geglättet, Pausen `(...)`, Zeitmarke `#hh:mm:ss-z#` am Absatzende, Zeilennummern (nur Word) |
+| Sinngemäße Zusammenfassung | Kernaussagen nach Themen, per Ollama erzeugt. **Immer gegenlesen**, Sprachmodelle können Aussagen verfälschen. |
+
+Alle Formen entstehen beim Export aus dem korrigierten Text; einmal korrigieren reicht.
+Tipp für wissenschaftliche Transkripte: Sprechernamen als `I` und `B1`, `B2` … eintragen.
 
 ## Tests
 
@@ -40,10 +57,14 @@ uv run pyinstaller --noconfirm --windowed --onedir --name InterviewTranskriber `
   --collect-all speechbrain --collect-data asteroid_filterbanks main.py
 ```
 
-Ergebnis: `dist/InterviewTranskriber/` (mehrere GB wegen torch+CUDA, daher `--onedir` statt `--onefile`). Den ganzen Ordner weitergeben.
+Ergebnis: `dist/InterviewTranskriber/` (mehrere GB wegen torch+CUDA, daher `--onedir`). Den ganzen Ordner weitergeben.
 Fehlende Module beim Start der EXE → jeweils `--collect-all <modul>` ergänzen.
 
 ## Bekannte Stolpersteine
 
-- **`torchcodec`/FFmpeg-Fehler beim Import von pyannote:** Die App dekodiert Audio selbst (PyAV) und übergibt pyannote nur die Wellenform; sollte der Import trotzdem scheitern, `torchcodec` passend zur torch-Version pinnen.
-- **cuDNN-/`cublas64_12.dll`-Fehler:** `torch` wird absichtlich vor `faster_whisper` importiert, damit dessen CUDA-DLLs gefunden werden. Notfalls läuft alles auch auf CPU.
+- **`torchcodec`/FFmpeg-Fehler beim Import von pyannote:** Die App dekodiert Audio selbst (PyAV) und übergibt pyannote
+  nur die Wellenform; sollte der Import trotzdem scheitern, FFmpeg „shared“ installieren oder `torchcodec` passend pinnen.
+- **cuDNN-/`cublas64_12.dll`-Fehler:** `torch` wird absichtlich vor `faster_whisper` importiert, damit dessen CUDA-DLLs
+  gefunden werden. Notfalls läuft alles auch auf CPU.
+- **Glättung:** regelbasiert. Doppelungen von Artikeln/Pronomen („die die“, „Sie sie“) bleiben bewusst stehen, weil sie im
+  Deutschen meist korrekt sind.

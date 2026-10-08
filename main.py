@@ -1,36 +1,57 @@
 """Interview-Transkriber – PySide6-Oberfläche."""
+import json
+import os
+import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, Signal
+from PySide6.QtCore import QMarginsF, QSettings, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QAction, QKeySequence, QPageLayout, QPageSize, QPdfWriter, QTextDocument
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFormLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter, QStyledItemDelegate,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHeaderView,
+    QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter,
+    QStyledItemDelegate, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from core import fmt_time, to_docx, to_html
+from core import FORMS, render, summarize, summary_blocks, to_docx, to_html, fmt_time
 
-AUDIO_FILTER = "Audio/Video (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm);;Alle Dateien (*)"
+OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm *.json);;"
+               "Alle Dateien (*)")
+PROJECT_SUFFIX = ".transkript.json"
+DEFAULT_OLLAMA_MODEL = "qwen3:8b"
 COL_TIME, COL_SPEAKER, COL_TEXT = range(3)
 
 
+def free_path(path: Path) -> Path:
+    """path, oder bei Kollision name-2, name-3 … (für Doppel-Endungen wie .transkript.json)."""
+    stem, suffix = path.name.removesuffix(PROJECT_SUFFIX), PROJECT_SUFFIX
+    i = 2
+    while path.exists():
+        path = path.with_name(f"{stem}-{i}{suffix}")
+        i += 1
+    return path
+
+
 class Worker(QThread):
+    """Führt fn(progress, cancelled) im Hintergrund aus."""
     progress = Signal(str, int)
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, path: str, token: str, num_speakers: int):
+    def __init__(self, fn):
         super().__init__()
-        self.path, self.token, self.num_speakers = path, token, num_speakers
+        self.fn = fn
+        self.cancel_requested = False
 
     def run(self):
         try:
-            from transcribe import transcribe  # schwere Importe (torch …) erst hier, damit die GUI sofort startet
-            self.done.emit(transcribe(self.path, self.token, self.num_speakers, self.progress.emit))
+            result = self.fn(self.progress.emit, lambda: self.cancel_requested)
+            if not self.cancel_requested:
+                self.done.emit(result)
         except Exception as e:  # noqa: BLE001 – jeder Fehler soll in der GUI landen, nicht den Thread killen
-            self.failed.emit(f"{type(e).__name__}: {e}")
+            if not self.cancel_requested:
+                self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class MultilineDelegate(QStyledItemDelegate):
@@ -46,33 +67,88 @@ class MultilineDelegate(QStyledItemDelegate):
         model.setData(index, editor.toPlainText().strip())
 
 
+class ReplaceDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Suchen und Ersetzen")
+        form = QFormLayout(self)
+        self.find, self.repl = QLineEdit(), QLineEdit()
+        self.case = QCheckBox("Groß-/Kleinschreibung beachten")
+        form.addRow("Suchen:", self.find)
+        form.addRow("Ersetzen durch:", self.repl)
+        form.addRow(self.case)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        buttons.addButton("Alle ersetzen", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Interview-Transkriber")
-        self.resize(1200, 750)
+        self.resize(1250, 780)
         self.settings = QSettings("Carasent", "InterviewTranscriber")
         self.audio_path: Path | None = None
+        self.project_path: Path | None = None
         self.worker: Worker | None = None
         self.name_edits: dict[str, QLineEdit] = {}
         self.dirty = False
 
-        # Toolbar
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(QAudioOutput(self))
+        self.player.playbackStateChanged.connect(self._update_play_text)
+
+        # Aktionen
+        self.act_open = self._act("Öffnen …", self.open_file, QKeySequence.StandardKey.Open)
+        self.act_save = self._act("Projekt speichern", self.save_project, QKeySequence.StandardKey.Save)
+        self.act_play = self._act("▶ Abspielen", self.toggle_play, "Ctrl+Space")
+        self.act_docx = self._act("Word …", lambda: self.export("docx"), "Ctrl+E")
+        self.act_pdf = self._act("PDF …", lambda: self.export("pdf"), "Ctrl+Shift+E")
+        self.act_cancel = self._act("Abbrechen", self.cancel)  # bewusst ohne Esc: würde beim Zelleditieren stundenlange Läufe abbrechen
+        self.act_replace = self._act("Suchen und Ersetzen …", self.replace_all, "Ctrl+H")
+
+        # Menü für Seltenes
+        m = self.menuBar().addMenu("&Datei")
+        for a in (self.act_open, self.act_save, self.act_docx, self.act_pdf):
+            m.addAction(a)
+        self.menuBar().addMenu("&Bearbeiten").addAction(self.act_replace)
+        m = self.menuBar().addMenu("&Einstellungen")
+        m.addAction(self._act("Hugging-Face-Token …", self.ask_token))
+        m.addAction(self._act("Ollama-Modell …", self.ask_ollama_model))
+
+        # Toolbar für Häufiges
         tb = self.addToolBar("Aktionen")
         tb.setMovable(False)
-        self.act_open = self._action(tb, "Audio öffnen …", self.open_audio, QKeySequence.StandardKey.Open)
+        tb.addAction(self.act_open)
+        tb.addAction(self.act_save)
         tb.addSeparator()
-        tb.addWidget(QLabel(" Anzahl Sprecher: "))
+        tb.addWidget(QLabel(" Sprecher: "))
         self.spin = QSpinBox(minimum=0, maximum=10, value=2, specialValueText="auto")
         self.spin.setToolTip("Bekannte Sprecheranzahl verbessert die Erkennung deutlich. 0 = automatisch.")
         tb.addWidget(self.spin)
+        tb.addWidget(QLabel("  Fachbegriffe: "))
+        self.hotwords = QLineEdit(self.settings.value("hotwords", ""), maximumWidth=260,
+                                  placeholderText="z. B. Namen, Produkte, Abkürzungen")
+        self.hotwords.setToolTip("Begriffe, die Whisper richtig schreiben soll (Leerzeichen-getrennt).")
+        self.hotwords.editingFinished.connect(lambda: self.settings.setValue("hotwords", self.hotwords.text()))
+        tb.addWidget(self.hotwords)
         tb.addSeparator()
-        self.act_docx = self._action(tb, "Als Word exportieren …", lambda: self.export("docx"), "Ctrl+S")
-        self.act_pdf = self._action(tb, "Als PDF exportieren …", lambda: self.export("pdf"), "Ctrl+P")
+        tb.addAction(self.act_play)
         tb.addSeparator()
-        self._action(tb, "Hugging-Face-Token …", self.ask_token)
+        tb.addWidget(QLabel(" Form: "))
+        self.form = QComboBox()
+        for key, label in FORMS.items():
+            self.form.addItem(label, key)
+        tb.addWidget(self.form)
+        tb.addWidget(QLabel(" Export als "))
+        tb.addAction(self.act_docx)
+        tb.addAction(self.act_pdf)
+        tb.addSeparator()
+        tb.addAction(self.act_cancel)
 
-        # Linke Seite: Titel + Sprechernamen
+        # Links: Titel + Sprechernamen
         left = QWidget()
         lv = QVBoxLayout(left)
         self.title_edit = QLineEdit(placeholderText="Titel des Transkripts")
@@ -84,7 +160,7 @@ class MainWindow(QMainWindow):
         lv.addLayout(self.names_form)
         lv.addStretch()
 
-        # Rechte Seite: Transkript-Tabelle
+        # Rechts: Transkript
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Zeit", "Sprecher", "Text"])
         self.table.setWordWrap(True)
@@ -95,33 +171,36 @@ class MainWindow(QMainWindow):
         h.setSectionResizeMode(COL_TEXT, QHeaderView.ResizeMode.Stretch)
         self.table.setItemDelegateForColumn(COL_TEXT, MultilineDelegate(self.table))
         self.table.itemChanged.connect(self._on_item_changed)
+        self.table.currentCellChanged.connect(self._seek_to_row)
 
         split = QSplitter()
         split.addWidget(left)
         split.addWidget(self.table)
-        split.setSizes([260, 940])
+        split.setSizes([260, 990])
         self.setCentralWidget(split)
 
-        self.status = QLabel("Audiodatei öffnen, um zu starten.")
+        self.status = QLabel("Audiodatei oder Projekt öffnen, um zu starten.")
         self.bar = QProgressBar(maximumWidth=300, visible=False)
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.bar)
         self._set_busy(False)
 
-    def _action(self, tb, text, slot, shortcut=None):
+    def _act(self, text, slot, shortcut=None):
         act = QAction(text, self)
         if shortcut:
             act.setShortcut(shortcut)
         act.triggered.connect(slot)
-        tb.addAction(act)
         return act
 
-    # ---------- Transkription ----------
-    def open_audio(self):
+    # ---------- Öffnen / Transkription ----------
+    def open_file(self):
         if not self._confirm_discard():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Interview-Aufnahme öffnen", "", AUDIO_FILTER)
+        path, _ = QFileDialog.getOpenFileName(self, "Aufnahme oder Projekt öffnen", "", OPEN_FILTER)
         if not path:
+            return
+        if path.lower().endswith(".json"):
+            self.load_project(Path(path))
             return
         token = self.settings.value("hf_token", "")
         if not token:
@@ -129,15 +208,49 @@ class MainWindow(QMainWindow):
             token = self.settings.value("hf_token", "")
             if not token:
                 return
-        self.audio_path = Path(path)
-        self.title_edit.setText(f"Interview – {self.audio_path.stem}")
-        self.worker = Worker(path, token, self.spin.value())
+        self._pending_audio = Path(path)  # Zustand erst bei Erfolg umstellen, sonst landet das alte Transkript im neuen Projekt
+        n, hot = self.spin.value(), self.hotwords.text()
+
+        def job(progress, cancelled):
+            from transcribe import transcribe  # schwere Importe (torch …) erst hier, damit die GUI sofort startet
+            return transcribe(path, token, n, hot, progress, cancelled)
+
+        self._run(job, self._on_transcribed)
+
+    def _on_transcribed(self, paragraphs: list[dict]):
+        audio = self._pending_audio
+        self.audio_path = audio
+        self.project_path = free_path(audio.with_suffix(PROJECT_SUFFIX))  # nie ein korrigiertes Projekt überschreiben
+        self.player.setSource(QUrl.fromLocalFile(str(audio)))
+        self.title_edit.setText(f"Interview – {audio.stem}")
+        self._fill(paragraphs)
+        self.save_project()  # Autosave: stundenlange Rechenarbeit nie nur im Speicher halten
+        if not self.dirty:
+            self.status.setText(f"Fertig: {len(paragraphs)} Absätze, gespeichert als {self.project_path.name}. "
+                                "Text und Sprecher prüfen, dann exportieren.")
+
+    # ---------- Hintergrundjobs ----------
+    def _run(self, fn, on_done):
+        # Nur gebundene Methoden verbinden: die laufen sicher im GUI-Thread (Lambdas ggf. im Worker-Thread)
+        self._on_done = on_done
+        self.worker = Worker(fn)
         self.worker.progress.connect(self._on_progress)
-        self.worker.done.connect(self._on_done)
+        self.worker.done.connect(self._dispatch_done)
         self.worker.failed.connect(self._on_failed)
-        self.worker.finished.connect(lambda: self._set_busy(False))
+        self.worker.finished.connect(self._on_worker_finished)
         self._set_busy(True)
         self.worker.start()
+
+    def _dispatch_done(self, result):
+        self._on_done(result)
+
+    def _on_worker_finished(self):
+        self._set_busy(False)
+
+    def cancel(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.cancel_requested = True
+            self.status.setText("Wird abgebrochen …")
 
     def _on_progress(self, text: str, pct: int):
         self.status.setText(text)
@@ -145,31 +258,65 @@ class MainWindow(QMainWindow):
         if pct >= 0:
             self.bar.setValue(pct)
 
-    def _on_done(self, paragraphs: list[dict]):
-        self._fill(paragraphs)
-        self.status.setText(f"Fertig: {len(paragraphs)} Absätze. Text und Sprecher prüfen, dann exportieren.")
-        self.dirty = True
-
     def _on_failed(self, msg: str):
         self.status.setText("Fehler bei der Verarbeitung.")
         QMessageBox.critical(self, "Fehler", msg)
 
     def _set_busy(self, busy: bool):
         self.bar.setVisible(busy)
+        self.act_cancel.setEnabled(busy)
         self.act_open.setEnabled(not busy)
+        if not busy and self.worker and self.worker.cancel_requested:
+            self.status.setText("Abgebrochen.")
         has_rows = self.table.rowCount() > 0
-        self.act_docx.setEnabled(not busy and has_rows)
-        self.act_pdf.setEnabled(not busy and has_rows)
+        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace):
+            a.setEnabled(not busy and has_rows)
+
+    # ---------- Projekt ----------
+    def save_project(self):
+        if not self.project_path:
+            path, _ = QFileDialog.getSaveFileName(self, "Projekt speichern", "", f"Projekt (*{PROJECT_SUFFIX})")
+            if not path:
+                return
+            self.project_path = Path(path)
+        data = {"version": 1, "audio": str(self.audio_path or ""), "title": self.title_edit.text(),
+                "names": self._names(), "paragraphs": self._paragraphs()}
+        try:
+            self.project_path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        except OSError as e:
+            QMessageBox.critical(self, "Speichern fehlgeschlagen", str(e))
+            return
+        self.dirty = False
+        self.status.setText(f"Gespeichert: {self.project_path}")
+
+    def load_project(self, path: Path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            paragraphs = data["paragraphs"]
+        except (OSError, ValueError, KeyError) as e:
+            QMessageBox.critical(self, "Projekt nicht lesbar", f"{path}\n{e}")
+            return
+        audio = Path(data.get("audio", ""))
+        if not audio.is_file():  # Ordner verschoben? Audio neben dem Projekt suchen
+            audio = path.parent / audio.name
+        self.audio_path = audio if audio.is_file() else None
+        self.player.setSource(QUrl.fromLocalFile(str(audio)) if self.audio_path else QUrl())
+        self.project_path = path
+        self.title_edit.setText(data.get("title", ""))
+        self._fill(paragraphs, data.get("names"))
+        self.dirty = False
+        self._set_busy(False)
+        self.status.setText(f"Projekt geladen: {path.name}" + ("" if self.audio_path else " (Audiodatei nicht gefunden)"))
 
     # ---------- Tabelle & Sprecher ----------
-    def _fill(self, paragraphs: list[dict]):
+    def _fill(self, paragraphs: list[dict], names: dict[str, str] | None = None):
         labels = sorted({p["speaker"] for p in paragraphs})
         while self.names_form.rowCount():
             self.names_form.removeRow(0)
         self.name_edits = {}
         for i, label in enumerate(labels):
-            edit = QLineEdit(placeholderText=label)
-            edit.setText("Interviewer:in" if i == 0 else f"Befragte:r {i}" if len(labels) > 2 else "Befragte:r")
+            default = "Interviewer:in" if i == 0 else "Befragte:r" if len(labels) == 2 else f"Person {i}"
+            edit = QLineEdit((names or {}).get(label, default), placeholderText=label)
             edit.textEdited.connect(self._refresh_combos)
             edit.textEdited.connect(self._mark_dirty)
             self.names_form.addRow(f"{label}:", edit)
@@ -181,6 +328,7 @@ class MainWindow(QMainWindow):
             t = QTableWidgetItem(fmt_time(p["start"]))
             t.setData(Qt.ItemDataRole.UserRole, (p["start"], p["end"]))
             t.setFlags(t.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            t.setToolTip("Zeile anklicken springt zur Stelle; Strg+Leertaste spielt ab.")
             self.table.setItem(row, COL_TIME, t)
             combo = QComboBox()
             for label in labels:
@@ -219,30 +367,77 @@ class MainWindow(QMainWindow):
             out.append({"start": start, "end": end, "speaker": speaker, "text": self.table.item(row, COL_TEXT).text()})
         return out
 
+    def replace_all(self):
+        dlg = ReplaceDialog(self)
+        if not dlg.exec() or not dlg.find.text():
+            return
+        pattern = re.compile(re.escape(dlg.find.text()), 0 if dlg.case.isChecked() else re.IGNORECASE)
+        total = 0
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, COL_TEXT)
+            new, n = pattern.subn(lambda _: dlg.repl.text(), item.text())  # lambda: Ersatz wörtlich, ohne \1-Deutung
+            if n:
+                item.setText(new)
+                total += n
+        self.status.setText(f"{total} Stelle(n) ersetzt.")
+
+    # ---------- Wiedergabe ----------
+    def _seek_to_row(self, row, *_):
+        if row >= 0 and self.audio_path:
+            self.player.setPosition(int(self.table.item(row, COL_TIME).data(Qt.ItemDataRole.UserRole)[0] * 1000))
+
+    def toggle_play(self):
+        if not self.audio_path:
+            self.status.setText("Keine Audiodatei geladen.")
+        elif self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
+
+    def _update_play_text(self, state):
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.act_play.setText("⏸ Pause" if playing else "▶ Abspielen")
+
     # ---------- Export ----------
     def export(self, kind: str):
+        form = self.form.currentData()
         title = self.title_edit.text().strip() or "Interview"
-        default = str((self.audio_path.parent if self.audio_path else Path.home()) / f"{title}.{kind}")
+        base = self.project_path.parent if self.project_path else Path.home()
+        default = str(base / f"{title} – {FORMS[form]}.{kind}".replace("/", "-"))
         filt = "Word-Dokument (*.docx)" if kind == "docx" else "PDF (*.pdf)"
         path, _ = QFileDialog.getSaveFileName(self, "Exportieren", default, filt)
         if not path:
             return
         paragraphs, names = self._paragraphs(), self._names()
+        if form == "zusammenfassung":
+            model = self.settings.value("ollama_model", DEFAULT_OLLAMA_MODEL)
+
+            def job(progress, cancelled):
+                progress(f"Fasse mit {model} zusammen (kann einige Minuten dauern) …", -1)
+                return summarize(paragraphs, names, model)
+
+            self._run(job, lambda md: self._write(path, kind, summary_blocks(title, md)))
+        else:
+            self._write(path, kind, render(title, paragraphs, names, form), line_numbers=form == "wissenschaftlich")
+
+    def _write(self, path: str, kind: str, blocks, line_numbers: bool = False):
         try:
             if kind == "docx":
-                to_docx(path, title, paragraphs, names)
+                to_docx(path, blocks, line_numbers)
             else:
                 doc = QTextDocument()
-                doc.setHtml(to_html(title, paragraphs, names))
+                doc.setHtml(to_html(blocks))
                 writer = QPdfWriter(path)
                 writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
                 writer.setPageMargins(QMarginsF(20, 20, 20, 20), QPageLayout.Unit.Millimeter)
                 doc.print_(writer)
-        except OSError as e:  # z. B. Datei ist noch in Word geöffnet
+                del writer  # Datei erst beim Zerstören vollständig geschrieben
+                if not Path(path).is_file() or Path(path).stat().st_size == 0:  # QPdfWriter meldet Fehler nicht
+                    raise OSError(f"PDF konnte nicht geschrieben werden (Datei geöffnet?): {path}")
+        except OSError as e:
             QMessageBox.critical(self, "Export fehlgeschlagen", str(e))
             return
-        self.dirty = False
-        self.status.setText(f"Gespeichert: {path}")
+        self.status.setText(f"Exportiert: {path}")
 
     # ---------- Einstellungen & Schließen ----------
     def ask_token(self):
@@ -257,18 +452,46 @@ class MainWindow(QMainWindow):
         if ok:
             self.settings.setValue("hf_token", token.strip())
 
+    def ask_ollama_model(self):
+        model, ok = QInputDialog.getText(
+            self, "Ollama-Modell", "Modell für die Zusammenfassung (vorher: ollama pull <modell>):",
+            text=self.settings.value("ollama_model", DEFAULT_OLLAMA_MODEL),
+        )
+        if ok and model.strip():
+            self.settings.setValue("ollama_model", model.strip())
+
     def _confirm_discard(self) -> bool:
         if self.worker and self.worker.isRunning():
-            QMessageBox.information(self, "Läuft noch", "Bitte warten, bis die aktuelle Verarbeitung fertig ist.")
+            QMessageBox.information(self, "Läuft noch", "Bitte warten oder zuerst „Abbrechen“ klicken.")
             return False
+        return self._confirm_unsaved()
+
+    def _confirm_unsaved(self) -> bool:
         if not self.dirty:
             return True
-        return QMessageBox.question(
-            self, "Ungespeicherte Änderungen", "Das aktuelle Transkript wurde nicht exportiert. Verwerfen?"
-        ) == QMessageBox.StandardButton.Yes
+        answer = QMessageBox.question(
+            self, "Ungespeicherte Änderungen", "Änderungen am Transkript speichern?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Save:
+            self.save_project()
+            return not self.dirty
+        return answer == QMessageBox.StandardButton.Discard
 
     def closeEvent(self, event):
-        event.accept() if self._confirm_discard() else event.ignore()
+        running = self.worker and self.worker.isRunning()
+        if running and QMessageBox.question(self, "Läuft noch", "Verarbeitung abbrechen und beenden?") \
+                != QMessageBox.StandardButton.Yes:
+            event.ignore()
+            return
+        if not self._confirm_unsaved():
+            event.ignore()
+            return
+        if running:
+            self.worker.cancel_requested = True
+            if not self.worker.wait(10_000):  # Modell-Laden/Ollama-Request sind nicht unterbrechbar
+                os._exit(0)  # QThread.terminate() kann mit gehaltenem GIL hängen; Worker schreibt keine Dateien
+        event.accept()
 
 
 def main():
