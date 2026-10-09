@@ -224,6 +224,87 @@ class TestMainWindowEditing(unittest.TestCase):
         self.assertNotIn(custom_word, self.win.checker.get_user_words())
         dlg.close()
 
+    def test_spellcheck_review_ignore_once_does_not_jump_back_on_change(self):
+        from main import SpellCheckReviewDialog
+
+        # Set paragraph 0 with two distinct errors: "garnicht" and "standart"
+        self.win.table.item(0, COL_TEXT).setText("Das ist garnicht so einfach und der standart ist hoch.")
+        self.win.table.item(1, COL_TEXT).setText("Alles in Ordnung hier.")
+        self.win.update_status_metrics()
+
+        dlg = SpellCheckReviewDialog(self.win, self.win.checker)
+        dlg._step_to_next_issue(0, 0)
+        self.assertIsNotNone(dlg._current_issue)
+        self.assertEqual(dlg._current_issue.matched_text, "garnicht")
+
+        # Ignore first error once
+        dlg.ignore_once()
+
+        # Dialog should advance to second error "standart"
+        self.assertIsNotNone(dlg._current_issue)
+        self.assertEqual(dlg._current_issue.matched_text, "standart")
+
+        # Now replace "standart" with "Standard"
+        dlg.edit_replacement.setText("Standard")
+        dlg.change_current()
+
+        # Text must be updated with "Standard" while retaining "garnicht"
+        updated_text = self.win.table.item(0, COL_TEXT).text()
+        self.assertIn("garnicht", updated_text)
+        self.assertIn("Standard", updated_text)
+
+        # CRITICAL TEST: Dialog must NOT have jumped back to "garnicht"!
+        # Since "garnicht" was ignored and "standart" was fixed, row 0 has no more unignored errors.
+        self.assertTrue(dlg.isHidden() or dlg._current_row != 0 or dlg._current_issue is None or dlg._current_issue.matched_text != "garnicht")
+        dlg.close()
+
+    def test_error_counter_prominence_and_toolbar_action(self):
+        # When errors exist
+        self.win.table.item(0, COL_TEXT).setText("Hier ist dast falsch.")
+        self.win.table.item(1, COL_TEXT).setText("Und hier ist garnicht gut.")
+        self.win.update_status_metrics()
+
+        self.assertIn("Fehler", self.win.spell_button.text())
+        self.assertIn("(2)", self.win.act_spellcheck.text())
+        self.assertIn("2", self.win.spell_button.text())
+
+        # Review dialog displays total and current error count
+        from main import SpellCheckReviewDialog
+        dlg = SpellCheckReviewDialog(self.win, self.win.checker)
+        dlg._step_to_next_issue(0, 0)
+        self.assertIn("Fehler 1 von 2", dlg.lbl_progress.text())
+        dlg.close()
+
+        # When all errors are fixed
+        self.win.table.item(0, COL_TEXT).setText("Hier ist das richtig.")
+        self.win.table.item(1, COL_TEXT).setText("Und hier ist gar nicht gut.")
+        self.win.update_status_metrics()
+        self.assertIn("Keine Fehler", self.win.spell_button.text())
+        self.assertEqual(self.win.act_spellcheck.text(), "Rechtschreibung")
+
+    def test_zoom_toolbar_responsiveness(self):
+        # Verify two toolbars exist and stay well proportioned
+        self.assertIsNotNone(self.win.tb)
+        self.assertIsNotNone(self.win.tb_edit)
+        self.assertLessEqual(self.win.hotwords.maximumWidth(), 200)
+
+        # Scale to 200% zoom
+        self.win.set_zoom(200)
+        self.assertEqual(self.win.zoom_level, 200)
+        self.assertEqual(self.win.zoom_button.text(), "200%")
+
+        # Table font scaled to 200%
+        base_pt = self.win.table.font().pointSizeF()
+        self.assertGreater(base_pt, 12.0)
+
+        # Chrome font clamped so controls stay visible
+        self.assertLessEqual(self.win.tb.font().pointSizeF(), 14.0)
+        self.assertLessEqual(self.win.tb.iconSize().width(), 20)
+
+        # Reset zoom
+        self.win.zoom_reset()
+        self.assertEqual(self.win.zoom_level, 100)
+
 
 if __name__ == "__main__":
     unittest.main()

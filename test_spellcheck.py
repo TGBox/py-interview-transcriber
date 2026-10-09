@@ -105,6 +105,44 @@ class TestSpellChecker(unittest.TestCase):
         self.assertEqual(self.checker.check_text(""), [])
         self.assertEqual(self.checker.check_text("   "), [])
 
+    def test_german_compound_words_and_morphology(self):
+        # Compounds should be recognized and NOT flagged as spelling errors
+        compounds = [
+            "Zukunftsvision",
+            "Orientierungssinn",
+            "Gesprächspartner",
+            "Nachrichtensendung",
+            "Haushaltsplan",
+            "Entscheidungsträger",
+            "Bundesregierung",
+            "Wirtschaftskrise",
+            "Klimaschutzgesetz",
+            "Arbeitsplätze",
+            "Bildungssystem",
+            "Auslandsreise",
+            "Interviewsituation",
+            "Ergebnisbericht",
+        ]
+        for word in compounds:
+            self.assertTrue(self.checker.is_known_word(word), f"Expected '{word}' to be recognized as known word.")
+
+        # Prefixed derivations and adverbs
+        derived = [
+            "unwichtig",
+            "ausprobieren",
+            "weiterentwickeln",
+            "mitbestimmen",
+            "tatsächlich",
+        ]
+        for word in derived:
+            self.assertTrue(self.checker.is_known_word(word), f"Expected '{word}' to be recognized as known word.")
+
+        # Typos must still be detected
+        typos = ["nemlich", "dast", "Schreibfehla", "garnicht"]
+        for typo in typos:
+            issues = self.checker.check_text(f"Hier ist {typo} falsch.")
+            self.assertTrue(any(i.matched_text == typo or typo in i.matched_text for i in issues), f"Expected typo '{typo}' to be detected.")
+
 
 if __name__ == "__main__":
     unittest.main()

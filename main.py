@@ -14,7 +14,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
-    QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
+    QProgressBar, QPushButton, QRadioButton, QSizePolicy, QSpinBox, QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -639,11 +639,13 @@ class SpellCheckReviewDialog(QDialog):
         self.main_win = parent
         self.checker = checker
         self.setWindowTitle("Rechtschreibung und Zeichensetzung")
-        self.resize(620, 440)
+        self.resize(640, 460)
 
         self._current_row = -1
         self._current_issue_index = -1
         self._current_issue: Issue | None = None
+        # Track ignored issues for this review session so skipped errors never jump back
+        self._session_ignored_occurrences: set[tuple[int, str, str, int]] = set()
 
         v = QVBoxLayout(self)
 
@@ -652,7 +654,7 @@ class SpellCheckReviewDialog(QDialog):
         self.lbl_category = QLabel()
         self.lbl_category.setStyleSheet("font-weight: bold; font-size: 11pt;")
         self.lbl_progress = QLabel()
-        self.lbl_progress.setStyleSheet("color: #888888; font-size: 9pt;")
+        self.lbl_progress.setStyleSheet("color: palette(text); font-weight: 500; font-size: 9.5pt;")
         header_row.addWidget(self.lbl_category, 1)
         header_row.addWidget(self.lbl_progress)
         v.addLayout(header_row)
@@ -720,6 +722,33 @@ class SpellCheckReviewDialog(QDialog):
             start_row = 0
         QTimer.singleShot(0, lambda: self._step_to_next_issue(start_row, 0))
 
+    def _get_row_issues(self, row: int) -> list[Issue]:
+        item = self.main_win.table.item(row, COL_TEXT)
+        text = item.text() if item else ""
+        raw_issues = self.checker.check_text(text)
+        counts: dict[tuple[str, str], int] = {}
+        unignored: list[Issue] = []
+        for iss in raw_issues:
+            sig = (iss.matched_text, iss.rule_id)
+            occ = counts.get(sig, 0)
+            counts[sig] = occ + 1
+            full_key = (row, iss.matched_text, iss.rule_id, occ)
+            if full_key not in self._session_ignored_occurrences:
+                unignored.append(iss)
+        return unignored
+
+    def _count_total_unignored(self) -> int:
+        total = 0
+        for r in range(self.main_win.table.rowCount()):
+            total += len(self._get_row_issues(r))
+        return total
+
+    def _get_current_global_issue_index(self, row: int, issue_idx: int) -> int:
+        prior = 0
+        for r in range(row):
+            prior += len(self._get_row_issues(r))
+        return prior + issue_idx + 1
+
     def _step_to_next_issue(self, from_row: int, from_issue_idx: int):
         total_rows = self.main_win.table.rowCount()
         if total_rows == 0:
@@ -728,26 +757,22 @@ class SpellCheckReviewDialog(QDialog):
 
         # Check forward from from_row
         for r in range(from_row, total_rows):
-            item = self.main_win.table.item(r, COL_TEXT)
-            text = item.text() if item else ""
-            issues = self.checker.check_text(text)
+            issues = self._get_row_issues(r)
             start_idx = from_issue_idx if r == from_row else 0
             if issues and start_idx < len(issues):
-                self._display_issue(r, start_idx, issues[start_idx], len(issues))
+                self._display_issue(r, start_idx, issues[start_idx])
                 return
 
         # Wrap around from 0 to from_row - 1
         for r in range(0, from_row):
-            item = self.main_win.table.item(r, COL_TEXT)
-            text = item.text() if item else ""
-            issues = self.checker.check_text(text)
+            issues = self._get_row_issues(r)
             if issues:
-                self._display_issue(r, 0, issues[0], len(issues))
+                self._display_issue(r, 0, issues[0])
                 return
 
         self._finish_review()
 
-    def _display_issue(self, row: int, issue_idx: int, issue: Issue, total_row_issues: int):
+    def _display_issue(self, row: int, issue_idx: int, issue: Issue):
         self._current_row = row
         self._current_issue_index = issue_idx
         self._current_issue = issue
@@ -761,7 +786,14 @@ class SpellCheckReviewDialog(QDialog):
         badge_text = "🔴 Rechtschreibung" if is_spelling else "🔵 Zeichensetzung"
         badge_color = "#c62828" if is_spelling else "#1565c0"
         self.lbl_category.setText(f"<span style='color: {badge_color};'>{badge_text}</span>")
-        self.lbl_progress.setText(f"Absatz {row + 1} von {self.main_win.table.rowCount()}")
+
+        # Total and progress counters
+        total_doc_errors = self._count_total_unignored()
+        current_error_num = self._get_current_global_issue_index(row, issue_idx)
+        self.lbl_progress.setText(
+            f"<b>Fehler {current_error_num} von {total_doc_errors}</b> &nbsp;·&nbsp; Absatz {row + 1} von {self.main_win.table.rowCount()}"
+        )
+        self.setWindowTitle(f"Rechtschreibung und Zeichensetzung ({total_doc_errors} verbleibend)")
 
         self.lbl_message.setText(issue.message)
 
@@ -802,15 +834,34 @@ class SpellCheckReviewDialog(QDialog):
         if item:
             self.edit_replacement.setText(item.text())
 
+    def _get_current_key(self) -> tuple[int, str, str, int] | None:
+        if self._current_row < 0 or not self._current_issue:
+            return None
+        item = self.main_win.table.item(self._current_row, COL_TEXT)
+        text = item.text() if item else ""
+        raw_issues = self.checker.check_text(text)
+        counts: dict[tuple[str, str], int] = {}
+        for iss in raw_issues:
+            sig = (iss.matched_text, iss.rule_id)
+            occ = counts.get(sig, 0)
+            counts[sig] = occ + 1
+            if iss.start == self._current_issue.start and iss.end == self._current_issue.end and iss.rule_id == self._current_issue.rule_id:
+                return (self._current_row, iss.matched_text, iss.rule_id, occ)
+        return (self._current_row, self._current_issue.matched_text, self._current_issue.rule_id, 1)
+
     def ignore_once(self):
-        if self._current_row >= 0:
-            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+        if self._current_row >= 0 and self._current_issue:
+            key = self._get_current_key()
+            if key:
+                self._session_ignored_occurrences.add(key)
+            self._step_to_next_issue(self._current_row, self._current_issue_index)
 
     def ignore_all(self):
         if self._current_issue:
             self.checker.ignore_word(self._current_issue.matched_text)
             self.main_win.table.viewport().update()
-            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+            self.main_win.update_status_metrics()
+            self._step_to_next_issue(self._current_row, self._current_issue_index)
 
     def change_current(self):
         if self._current_row < 0 or not self._current_issue:
@@ -823,7 +874,9 @@ class SpellCheckReviewDialog(QDialog):
         iss = self._current_issue
         new_text = text[:iss.start] + repl + text[iss.end:]
         item.setText(new_text)  # triggers itemChanged -> _mark_dirty & updates
-        self._step_to_next_issue(self._current_row, 0)
+        self.main_win.table.viewport().update()
+        self.main_win.update_status_metrics()
+        self._step_to_next_issue(self._current_row, self._current_issue_index)
 
     def change_all(self):
         if self._current_row < 0 or not self._current_issue:
@@ -835,19 +888,22 @@ class SpellCheckReviewDialog(QDialog):
             if item and target in item.text():
                 pattern = re.compile(re.escape(target))
                 item.setText(pattern.sub(repl, item.text()))
-        self._step_to_next_issue(self._current_row, 0)
+        self.main_win.table.viewport().update()
+        self.main_win.update_status_metrics()
+        self._step_to_next_issue(self._current_row, self._current_issue_index)
 
     def add_to_dictionary(self):
         if self._current_issue:
             self.main_win.add_user_word(self._current_issue.matched_text)
-            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+            self._step_to_next_issue(self._current_row, self._current_issue_index)
 
     def _finish_review(self):
-        QMessageBox.information(
-            self,
-            "Überprüfung abgeschlossen",
-            "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen.",
-        )
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            QMessageBox.information(
+                self,
+                "Überprüfung abgeschlossen",
+                "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen.",
+            )
         self.accept()
 
 
@@ -1084,11 +1140,14 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
 
-        # Toolbar für Häufiges
-        self.tb = self.addToolBar("Aktionen")
+        # Toolbars: zweigeteilt für responsive Darstellung bei jeder Zoomstufe
+        self.tb = self.addToolBar("Projekt & Audio")
+        self.tb.setObjectName("tb_project")
         self.tb.setMovable(False)
         self.tb.addAction(self.act_open)
         self.tb.addAction(self.act_save)
+        self.tb.addSeparator()
+        self.tb.addAction(self.act_play)
         self.tb.addSeparator()
         self.tb.addWidget(QLabel(" Sprecher: "))
         self.spin = QSpinBox()
@@ -1100,30 +1159,34 @@ class MainWindow(QMainWindow):
         self.tb.addWidget(self.spin)
         self.tb.addWidget(QLabel("  Fachbegriffe: "))
         self.hotwords = QLineEdit(self.settings.value("hotwords", ""))
-        self.hotwords.setMaximumWidth(260)
-        self.hotwords.setPlaceholderText("z. B. Namen, Produkte, Abkürzungen")
+        self.hotwords.setMinimumWidth(80)
+        self.hotwords.setMaximumWidth(190)
+        self.hotwords.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.hotwords.setPlaceholderText("z. B. Namen, Begriffe")
         self.hotwords.setToolTip("Begriffe, die Whisper richtig schreiben soll (Leerzeichen-getrennt).")
         self.hotwords.editingFinished.connect(lambda: self.settings.setValue("hotwords", self.hotwords.text()))
         self.hotwords.editingFinished.connect(self._update_spellcheck_project_words)
         self.tb.addWidget(self.hotwords)
-        self.tb.addSeparator()
-        self.tb.addAction(self.act_play)
-        self.tb.addAction(self.act_spellcheck)
-        self.tb.addAction(self.act_smooth)
-        self.tb.addAction(self.act_toggle_smooth_col)
-        self.tb.addSeparator()
-        self.tb.addWidget(QLabel(" Form: "))
+
+        self.tb_edit = self.addToolBar("Text & Export")
+        self.tb_edit.setObjectName("tb_edit")
+        self.tb_edit.setMovable(False)
+        self.tb_edit.addAction(self.act_spellcheck)
+        self.tb_edit.addAction(self.act_smooth)
+        self.tb_edit.addAction(self.act_toggle_smooth_col)
+        self.tb_edit.addSeparator()
+        self.tb_edit.addWidget(QLabel(" Form: "))
         self.form = QComboBox()
         for key, label in FORMS.items():
             self.form.addItem(label, key)
         self.form.setCurrentIndex(max(0, self.form.findData(self.settings.value("form", "woertlich"))))
         self.form.currentIndexChanged.connect(lambda _: self.settings.setValue("form", self.form.currentData()))
-        self.tb.addWidget(self.form)
-        self.tb.addWidget(QLabel(" Export als "))
-        self.tb.addAction(self.act_docx)
-        self.tb.addAction(self.act_pdf)
-        self.tb.addSeparator()
-        self.tb.addAction(self.act_cancel)
+        self.tb_edit.addWidget(self.form)
+        self.tb_edit.addWidget(QLabel(" Export: "))
+        self.tb_edit.addAction(self.act_docx)
+        self.tb_edit.addAction(self.act_pdf)
+        self.tb_edit.addSeparator()
+        self.tb_edit.addAction(self.act_cancel)
 
         # Links: Titel + Sprechernamen
         left = QWidget()
@@ -1184,6 +1247,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(split)
 
         self.status = QLabel("Audiodatei oder Projekt öffnen, um zu starten.")
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.bar = QProgressBar()
         self.bar.setMaximumWidth(300)
         self.bar.setVisible(False)
@@ -1715,6 +1779,7 @@ class MainWindow(QMainWindow):
         zoomed_font = QFont(QApplication.font())
         zoomed_font.setPointSizeF(base_pt * scale)
 
+        # Scale transcript content and editors
         self.table.setFont(zoomed_font)
         self.table.horizontalHeader().setFont(zoomed_font)
 
@@ -1724,23 +1789,29 @@ class MainWindow(QMainWindow):
             for edit in self.name_edits.values():
                 edit.setFont(zoomed_font)
 
-        if hasattr(self, "menuBar") and self.menuBar():
-            self.menuBar().setFont(zoomed_font)
-            for m in self.menuBar().findChildren(QMenu):
-                m.setFont(zoomed_font)
+        # Chrome scaling: keep menu, toolbars, and status bar clamped to a comfortable readable range
+        # so controls and buttons never overflow or disappear from view
+        chrome_scale = max(0.9, min(1.15, scale))
+        chrome_font = QFont(QApplication.font())
+        chrome_font.setPointSizeF(base_pt * chrome_scale)
 
-        if hasattr(self, "tb") and self.tb:
-            self.tb.setFont(zoomed_font)
-            for w in self.tb.findChildren(QWidget):
-                w.setFont(zoomed_font)
-            base_icon = 16
-            icon_sz = max(14, int(round(base_icon * scale)))
-            self.tb.setIconSize(QSize(icon_sz, icon_sz))
+        if hasattr(self, "menuBar") and self.menuBar():
+            self.menuBar().setFont(chrome_font)
+            for m in self.menuBar().findChildren(QMenu):
+                m.setFont(chrome_font)
+
+        icon_sz = max(14, min(18, int(round(16 * chrome_scale))))
+        for tb in (getattr(self, "tb", None), getattr(self, "tb_edit", None)):
+            if tb:
+                tb.setFont(chrome_font)
+                for w in tb.findChildren(QWidget):
+                    w.setFont(chrome_font)
+                tb.setIconSize(QSize(icon_sz, icon_sz))
 
         if hasattr(self, "statusBar") and self.statusBar():
-            self.statusBar().setFont(zoomed_font)
+            self.statusBar().setFont(chrome_font)
             for w in self.statusBar().findChildren(QWidget):
-                w.setFont(zoomed_font)
+                w.setFont(chrome_font)
 
         self.table.resizeRowsToContents()
         self.table.resizeColumnToContents(COL_TIME)
@@ -1854,11 +1925,12 @@ class MainWindow(QMainWindow):
         issue_map = self.checker.check_paragraphs(paras)
         total_issues = sum(len(iss) for iss in issue_map.values())
         if total_issues == 0:
-            QMessageBox.information(
-                self,
-                "Keine Fehler gefunden",
-                "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen. Es wurden keine Fehler gefunden.",
-            )
+            if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+                QMessageBox.information(
+                    self,
+                    "Keine Fehler gefunden",
+                    "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen. Es wurden keine Fehler gefunden.",
+                )
             return
         dlg = SpellCheckReviewDialog(self, self.checker)
         dlg.exec()
@@ -1912,14 +1984,36 @@ class MainWindow(QMainWindow):
             self._update_spellcheck_project_words()
             issue_map = self.checker.check_paragraphs(paras)
             total_issues = sum(len(iss) for iss in issue_map.values())
-            ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
+            is_dark = self.settings.value("dark_mode", False, type=bool)
+
             if total_issues == 0:
                 self.spell_button.setText("✓ Keine Fehler")
-                self.spell_button.setStyleSheet(f"color: {ok_col}")
+                badge_bg = "rgba(16, 185, 129, 0.12)" if not is_dark else "rgba(16, 185, 129, 0.22)"
+                badge_fg = "#059669" if not is_dark else "#34d399"
+                badge_border = "rgba(16, 185, 129, 0.35)"
+                self.spell_button.setStyleSheet(
+                    f"background-color: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_border}; border-radius: 4px; padding: 2px 7px; font-weight: 500;"
+                )
+                self.spell_button.setToolTip("Rechtschreibung und Zeichensetzung geprüft: Keine Fehler gefunden.")
             else:
-                self.spell_button.setText(f"⚠ {total_issues} Fehler (F7)")
-                self.spell_button.setStyleSheet(f"color: {err_col}; font-weight: bold;")
+                self.spell_button.setText(f"⚠ {total_issues} Fehler im Transkript (F7)")
+                badge_bg = "rgba(239, 68, 68, 0.12)" if not is_dark else "rgba(239, 68, 68, 0.24)"
+                badge_fg = "#dc2626" if not is_dark else "#f87171"
+                badge_border = "rgba(239, 68, 68, 0.4)"
+                self.spell_button.setStyleSheet(
+                    f"background-color: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_border}; border-radius: 4px; padding: 2px 7px; font-weight: bold;"
+                )
+                self.spell_button.setToolTip(f"{total_issues} Rechtschreib- oder Zeichensetzungsfehler gefunden. Klicken oder F7 zum Überprüfen.")
+
             self.spell_button.setVisible(has_rows)
+
+            if hasattr(self, "act_spellcheck"):
+                if total_issues > 0:
+                    self.act_spellcheck.setText(f"Rechtschreibung ({total_issues})")
+                    self.act_spellcheck.setToolTip(f"{total_issues} Fehler im Transkript gefunden (F7 zum Überprüfen).")
+                else:
+                    self.act_spellcheck.setText("Rechtschreibung")
+                    self.act_spellcheck.setToolTip("Überprüft Rechtschreibung und Zeichensetzung Schritt für Schritt (F7).")
 
     # ---------- Wiedergabe ----------
     def _seek_to_row(self, row, *_):
