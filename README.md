@@ -25,7 +25,7 @@ der Status steht dort und unten rechts in der Statusleiste (grün = bereit, rot 
 herunterladen und **umbenannt** ablegen:
 
 | Download | ablegen als |
-|---|---|
+| --- | --- |
 | <https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff> | `dict/hunspell/de_DE.aff` |
 | <https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic> | `dict/hunspell/de_DE.dic` |
 
