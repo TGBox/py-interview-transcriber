@@ -1,147 +1,143 @@
 import unittest
 
-from spellcheck import SpellChecker, Issue
+import spellcheck
+from spellcheck import SpellChecker
 
 
-class TestSpellChecker(unittest.TestCase):
-    def setUp(self):
-        self.checker = SpellChecker()
+class FakeDict:
+    """Mimics pyenchant.Dict: capitalised forms of lowercase words are accepted, lowercase nouns are not."""
 
-    def test_punctuation_plenk_and_klemp(self):
-        # Plenken: space before comma
-        issues = self.checker.check_text("Hallo , Welt.")
-        self.assertTrue(any(i.rule_id == "punct_plenk" for i in issues))
+    def __init__(self, words):
+        self.words = set(words)
+        self.suggest_calls = 0
 
-        # Klempen: missing space after comma
-        issues2 = self.checker.check_text("Hallo,Welt.")
-        self.assertTrue(any(i.rule_id == "punct_klemp" for i in issues2))
+    def check(self, w):
+        return w in self.words or (w[:1].isupper() and w.lower() in self.words)
 
-    def test_duplicate_punctuation(self):
-        issues = self.checker.check_text("Was soll das??")
-        self.assertTrue(any(i.rule_id == "punct_duplicate" for i in issues))
+    def suggest(self, w):
+        self.suggest_calls += 1
+        return [x for x in self.words if x.lower() == w.lower()] or ["Vorschlag"]
 
-        # Ellipsis should be fine
-        issues_ellipsis = self.checker.check_text("Warten wir mal ab...")
-        self.assertFalse(any(i.rule_id == "punct_duplicate" for i in issues_ellipsis))
 
-    def test_subclause_missing_comma(self):
-        # Missing comma before "weil"
-        issues = self.checker.check_text("Ich komme nicht weil ich krank bin.")
-        self.assertTrue(any(i.rule_id == "punct_subclause_comma" and i.matched_text == "weil" for i in issues))
+WORDS = {"ich", "komme", "nicht", "weil", "krank", "bin", "das", "ist", "gut", "wie", "geht", "es", "dir", "und",
+         "dann", "gingen", "wir", "hier", "steht", "Hoffnung", "gibt", "noch", "Mensch", "nutzen", "heute", "alles",
+         "in", "bester", "Ordnung", "ein", "Fehler", "da", "Plenk", "so", "einfach", "der"}
 
-        # With comma -> no subclause comma issue
-        issues_ok = self.checker.check_text("Ich komme nicht, weil ich krank bin.")
-        self.assertFalse(any(i.rule_id == "punct_subclause_comma" for i in issues_ok))
+
+def rules(text, checker=None):
+    return [i.rule_id for i in (checker or SpellChecker(dictionary=FakeDict(WORDS))).check_text(text)]
+
+
+class Punctuation(unittest.TestCase):
+    def test_plenk_and_klemp(self):
+        self.assertIn("punct_plenk", rules("Hallo , Welt."))
+        self.assertIn("punct_klemp", rules("Hallo,Welt."))
+
+    def test_duplicate_but_not_ellipsis(self):
+        self.assertIn("punct_duplicate", rules("Was soll das??"))
+        self.assertNotIn("punct_duplicate", rules("Warten wir mal ab..."))
+
+    def test_subclause_comma_found_at_any_word_position(self):
+        for s in ("Ich komme nicht weil ich krank bin.", "Er sagt dass es stimmt.", "Er fragt ob du kommst."):
+            self.assertIn("punct_subclause_comma", rules(s), s)
+        self.assertNotIn("punct_subclause_comma", rules("Ich komme nicht, weil ich krank bin."))
+
+    def test_no_false_comma_for_adverbs_and_after_und(self):
+        for s in ("Ich war gestern da.", "Was machst du damit?", "Wir müssen das bis Freitag fertig haben.",
+                  "Und dass er kommt, ist klar.", "Ich weiß, dass er kommt."):
+            self.assertNotIn("punct_subclause_comma", rules(s), s)
 
     def test_sentence_capitalization(self):
-        # Sentence start after period
-        issues = self.checker.check_text("Das ist gut. wie geht es dir?")
-        self.assertTrue(any(i.rule_id == "punct_sentence_start_capital" for i in issues))
+        self.assertIn("punct_sentence_start_capital", rules("Das ist gut. wie geht es dir?"))
+        self.assertIn("punct_sentence_start_capital", rules("und dann gingen wir."))
 
-        # Paragraph start lowercase
-        issues_start = self.checker.check_text("und dann gingen wir.")
-        self.assertTrue(any(i.rule_id == "punct_sentence_start_capital" for i in issues_start))
+    def test_ellipsis_in_speech_is_fine(self):
+        self.assertEqual(rules("Ich weiß nicht ... vielleicht.", SpellChecker(dictionary=False)), [])
 
-    def test_spelling_common_replacements(self):
-        issues = self.checker.check_text("Das ist garnicht so einfach.")
-        self.assertTrue(any(i.rule_id == "spelling_gar_nicht" for i in issues))
 
-        issues2 = self.checker.check_text("Das ist der Standart hier.")
-        self.assertTrue(any(i.rule_id == "spelling_standard" for i in issues2))
+class Phrases(unittest.TestCase):
+    def test_known_misspellings(self):
+        self.assertIn("spelling_gar_nicht", rules("Das ist garnicht so einfach."))
+        self.assertIn("spelling_standard", rules("Das ist der Standart hier."))
+        self.assertIn("spelling_im_voraus", rules("Vielen Dank im voraus."))
 
-    def test_spelling_phrases(self):
-        issues = self.checker.check_text("Vielen Dank im voraus.")
-        self.assertTrue(any(i.rule_id == "spelling_im_voraus" for i in issues))
+    def test_seid_before_time_word(self):
+        issues = SpellChecker(dictionary=False).check_text("Ich warte seid gestern.")
+        hit = [i for i in issues if i.rule_id == "grammar_seit_time"]
+        self.assertEqual(hit[0].suggestions, ["seit gestern"])
 
-        issues2 = self.checker.check_text("Ich warte seid gestern.")
-        self.assertTrue(any(i.rule_id == "grammar_seit_time" for i in issues2))
+    def test_correct_german_is_not_flagged(self):
+        c = SpellChecker(dictionary=False)
+        for s in ("Seit Jahren arbeite ich hier.", "Ihr seid gekommen.", "Ich glaube das nicht.",
+                  "Ich sehe das anders.", "Kinder, die die Lehrer mögen."):
+            self.assertEqual(c.check_text(s), [], s)
 
-    def test_noun_capitalization(self):
-        # "hoffnung" ends with -ung and should be capitalized
-        issues = self.checker.check_text("Es gibt noch hoffnung.")
-        self.assertTrue(any(i.rule_id == "spelling_noun_capitalization" for i in issues))
 
-    def test_user_dictionary_and_ignore(self):
-        unknown_word = "Unbekanntowort"
-        issues = self.checker.check_text(f"Hier steht {unknown_word}.")
-        self.assertTrue(any(i.matched_text == unknown_word for i in issues))
+class Dictionary(unittest.TestCase):
+    def setUp(self):
+        self.d = FakeDict(WORDS)
+        self.c = SpellChecker(dictionary=self.d)
 
-        # Add to user dictionary
-        self.checker.add_user_word(unknown_word)
-        issues_after_add = self.checker.check_text(f"Hier steht {unknown_word}.")
-        self.assertFalse(any(i.matched_text == unknown_word for i in issues_after_add))
+    def test_unknown_word_flagged_known_not(self):
+        issues = self.c.check_text("Hier steht Unbekanntowort.")
+        self.assertEqual([i.matched_text for i in issues], ["Unbekanntowort"])
+        self.assertEqual(issues[0].category, "spelling")
 
-        # Remove from user dictionary
-        self.checker.remove_user_word(unknown_word)
-        self.checker.ignore_word(unknown_word)
-        issues_after_ignore = self.checker.check_text(f"Hier steht {unknown_word}.")
-        self.assertFalse(any(i.matched_text == unknown_word for i in issues_after_ignore))
+    def test_lowercase_noun_flagged_with_suggestion_on_demand(self):
+        issues = self.c.check_text("Es gibt noch hoffnung.")
+        self.assertEqual([i.matched_text for i in issues], ["hoffnung"])
+        self.assertEqual(issues[0].suggestions, [])  # Vorschläge erst bei Bedarf (teuer)
+        self.assertEqual(self.d.suggest_calls, 0)
+        self.assertEqual(self.c.suggest_spelling("hoffnung"), ["Hoffnung"])
 
-    def test_project_words(self):
-        hotword = "Carasent"
-        self.checker.set_project_words([hotword, "Sprecher 1"])
-        issues = self.checker.check_text("Wir nutzen Carasent heute.")
-        self.assertFalse(any(i.matched_text == hotword for i in issues))
+    def test_user_project_and_ignored_words(self):
+        word = "Unbekanntowort"
+        self.c.add_user_word(word)
+        self.assertEqual(self.c.check_text(f"Hier steht {word}."), [])
+        self.c.remove_user_word(word)
+        self.assertEqual(len(self.c.check_text(f"Hier steht {word}.")), 1)
+        self.c.ignore_word(word)
+        self.assertEqual(self.c.check_text(f"Hier steht {word}."), [])
+        self.c.set_project_words(["Carasent", "Sprecher 1"])
+        self.assertEqual(self.c.check_text("Wir nutzen Carasent heute."), [])
 
-    def test_check_paragraphs(self):
-        paras = [
-            {"text": "Alles in bester Ordnung hier."},
-            {"text": "Hier ist ein Fehler , weil da ein Plenk ist."},
-        ]
-        results = self.checker.check_paragraphs(paras)
-        self.assertNotIn(0, results)
-        self.assertIn(1, results)
-        self.assertGreater(len(results[1]), 0)
+    def test_short_abbreviations_skipped(self):
+        self.assertNotIn("GKV", [i.matched_text for i in self.c.check_text("Die GKV ist da.")])
 
-    def test_suggestions(self):
-        suggs = self.checker.suggest_spelling("Standart")
-        self.assertIn("Standard", suggs)
+    def test_without_dictionary_only_rules(self):
+        c = SpellChecker(dictionary=False)
+        self.assertFalse(c.available)
+        self.assertEqual(c.check_text("Hier steht Unbekanntowort."), [])
+        self.assertIn("spelling_gar_nicht", [i.rule_id for i in c.check_text("Das ist garnicht gut.")])
 
-        suggs2 = self.checker.suggest_spelling("Menschhn")
-        self.assertTrue(len(suggs2) > 0)
-        self.assertIn("Mensch", suggs2)
 
-    def test_empty_and_whitespace(self):
-        self.assertEqual(self.checker.check_text(""), [])
-        self.assertEqual(self.checker.check_text("   "), [])
+class Caching(unittest.TestCase):
+    def test_cached_until_word_lists_change(self):
+        c = SpellChecker(dictionary=FakeDict(WORDS))
+        first = c.check_text("Hier steht Xyz.")
+        self.assertIs(c.check_text("Hier steht Xyz."), first)
+        c.set_project_words(["Abc"])
+        self.assertIsNot(c.check_text("Hier steht Xyz."), first)
+        second = c.check_text("Hier steht Xyz.")
+        c.set_project_words(["Abc"])  # unverändert -> Cache bleibt
+        self.assertIs(c.check_text("Hier steht Xyz."), second)
 
-    def test_german_compound_words_and_morphology(self):
-        # Compounds should be recognized and NOT flagged as spelling errors
-        compounds = [
-            "Zukunftsvision",
-            "Orientierungssinn",
-            "Gesprächspartner",
-            "Nachrichtensendung",
-            "Haushaltsplan",
-            "Entscheidungsträger",
-            "Bundesregierung",
-            "Wirtschaftskrise",
-            "Klimaschutzgesetz",
-            "Arbeitsplätze",
-            "Bildungssystem",
-            "Auslandsreise",
-            "Interviewsituation",
-            "Ergebnisbericht",
-        ]
-        for word in compounds:
-            self.assertTrue(self.checker.is_known_word(word), f"Expected '{word}' to be recognized as known word.")
+    def test_check_paragraphs_and_empty(self):
+        c = SpellChecker(dictionary=FakeDict(WORDS))
+        res = c.check_paragraphs([{"text": "Alles in bester Ordnung hier."}, {"text": "Ein Fehler , da."}])
+        self.assertNotIn(0, res)
+        self.assertIn(1, res)
+        self.assertEqual(c.check_text(""), [])
+        self.assertEqual(c.check_text("   "), [])
 
-        # Prefixed derivations and adverbs
-        derived = [
-            "unwichtig",
-            "ausprobieren",
-            "weiterentwickeln",
-            "mitbestimmen",
-            "tatsächlich",
-        ]
-        for word in derived:
-            self.assertTrue(self.checker.is_known_word(word), f"Expected '{word}' to be recognized as known word.")
 
-        # Typos must still be detected
-        typos = ["nemlich", "dast", "Schreibfehla", "garnicht"]
-        for typo in typos:
-            issues = self.checker.check_text(f"Hier ist {typo} falsch.")
-            self.assertTrue(any(i.matched_text == typo or typo in i.matched_text for i in issues), f"Expected typo '{typo}' to be detected.")
+class Loader(unittest.TestCase):
+    def test_load_dictionary_never_raises(self):
+        d, msg = spellcheck.load_dictionary()
+        self.assertIsInstance(msg, str)
+        if d is not None:  # echtes Hunspell vorhanden (z. B. auf dem Entwicklungsrechner)
+            self.assertTrue(d.check("Haus"))
+            self.assertFalse(d.check("Hauss"))
 
 
 if __name__ == "__main__":

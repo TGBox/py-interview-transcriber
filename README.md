@@ -21,6 +21,17 @@ unter *Settings → Access Tokens* einen **Read**-Token erzeugen und in der App 
 `ollama pull qwen3:8b`. In *Einstellungen* lassen sich Adresse und Modell wählen (Liste der installierten Modelle);
 der Status steht dort und unten rechts in der Statusleiste (grün = bereit, rot = Problem, Klick öffnet die Einstellungen).
 
+**Deutsches Wörterbuch** (für die Rechtschreibprüfung, einmalig): die zwei Hunspell-Dateien des LibreOffice-Projekts
+herunterladen und **umbenannt** ablegen:
+
+| Download | ablegen als |
+|---|---|
+| <https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff> | `dict/hunspell/de_DE.aff` |
+| <https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic> | `dict/hunspell/de_DE.dic` |
+
+Ohne Wörterbuch prüft die App nur die Zeichensetzung (Hinweis im Tooltip der Fehleranzeige). Lizenz des Wörterbuchs:
+GPL/LGPL (igerman98/frami) – für die interne Nutzung unkritisch, bei Weitergabe nach außen beachten.
+
 Alle Einstellungen – Token, Ollama-Adresse/-Modell, Sprecheranzahl, Fachbegriffe, zuletzt gewählte Form – werden
 automatisch gespeichert.
 
@@ -35,7 +46,8 @@ automatisch gespeichert.
    - **Satzgrenzen korrigieren:** **Strg+Umschalt+Auf** übergibt den ersten Satz an die Zeile davor, **Strg+Umschalt+Ab** den letzten Satz an die Zeile danach.
    - **Automatisch glätten:** *Bearbeiten → Sprechergrenzen automatisch glätten* korrigiert verschobene Satzanfänge/-enden über das gesamte Transkript.
    - **Zoom & Lesbarkeit:** **Strg++** vergrößert die Tabelle und Eingabefelder, **Strg+-** verkleinert, **Strg+0** setzt auf 100% zurück. Alternativ **Strg + Mausrad** oder Klick auf die Prozentanzeige in der Statusleiste.
-   - **Rechtschreibung & Zeichensetzung (wie in Word):** Rote Wellenlinien markieren Rechtschreibfehler, blaue Wellenlinien Zeichensetzungs- und Grammatikfehler. Mit **F7** oder *Überprüfen → Rechtschreibung und Zeichensetzung …* öffnet sich der Überprüfungsdialog zum schrittweisen Korrigieren mit Vorschlägen, Ignorieren oder Hinzufügen zum Wörterbuch. Rechtsklick auf eine Zelle bietet Sofortvorschläge.
+   - **Rückgängig:** **Strg+Z** macht Tippen, Sprecherwechsel, Teilen, Zusammenführen, Satz-Verschieben, Löschen, Ersetzen und die KI-Glättung schrittweise rückgängig (letzte 30 Schritte; Sprechernamen bleiben). Während man in einer Zelle tippt, wirkt Strg+Z nur im Text der Zelle.
+   - **Rechtschreibung & Zeichensetzung (wie in Word):** Rote Wellenlinien markieren Rechtschreibfehler (Hunspell-Wörterbuch, siehe Einrichtung), blaue Wellenlinien Zeichensetzungsfehler. Mit **F7** oder *Überprüfen → Rechtschreibung und Zeichensetzung …* öffnet sich der Überprüfungsdialog zum schrittweisen Korrigieren mit Vorschlägen, Ignorieren oder Hinzufügen zum Wörterbuch. Rechtsklick auf eine Zelle bietet Sofortvorschläge.
    - **Wörter zählen & Textstatistik:** **Strg+Umschalt+C** oder Klick auf die Wortanzahl in der Statusleiste öffnet die detaillierte Statistik (Zeichen mit/ohne Leerzeichen, Wörter, Absätze, Sätze und Aufschlüsselung nach Sprechern).
    - **Rechtsklick:** Kontextmenü zum Teilen, Zusammenführen und Löschen von Absätzen sowie Rechtschreibkorrekturen. **F11** schaltet den Vollbildmodus um, **Strg+D** wechselt zwischen hellem und dunklem Design.
 4. Optional **Mit Sprachmodell glätten** (Strg+G): füllt die Spalte *Geglättet (Sprachmodell)* Absatz für Absatz.
@@ -70,7 +82,8 @@ uv run python -m unittest
 ```powershell
 uv run pyinstaller --noconfirm --windowed --onedir --name InterviewTranskriber `
   --collect-all pyannote.audio --collect-all faster_whisper --collect-all lightning_fabric `
-  --collect-all speechbrain --collect-data asteroid_filterbanks main.py
+  --collect-all speechbrain --collect-data asteroid_filterbanks `
+  --collect-all enchant --add-data "dict;dict" main.py
 ```
 
 Ergebnis: `dist/InterviewTranskriber/` (mehrere GB wegen torch+CUDA, daher `--onedir`). Den ganzen Ordner weitergeben.

@@ -1,12 +1,15 @@
 import os
+import tempfile
 import unittest
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from unittest import mock
+
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 # Run headless
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
-from main import MainWindow, COL_TIME, COL_SPEAKER, COL_TEXT, COL_SMOOTH
+from main import MainWindow, COL_SPEAKER, COL_TEXT, COL_SMOOTH
 
 class TestMainWindowEditing(unittest.TestCase):
     @classmethod
@@ -14,7 +17,16 @@ class TestMainWindowEditing(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.win = MainWindow()
+        # Eigene INI-Datei pro Test: niemals die echten Einstellungen (Registry) des Nutzers verändern
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        settings = QSettings(os.path.join(tmp.name, "test.ini"), QSettings.Format.IniFormat)
+        # Keine Netzwerkprüfung und keine modalen Meldungen im Headless-Test
+        for patcher in (mock.patch.object(MainWindow, "refresh_llm_status", return_value=(False, "")),
+                        mock.patch.object(QMessageBox, "information", return_value=QMessageBox.StandardButton.Ok)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.win = MainWindow(settings)
         self.paragraphs = [
             {"start": 0.0, "end": 4.0, "speaker": "SPEAKER_00", "text": "Erster Satz. Zweiter Satz."},
             {"start": 4.0, "end": 8.0, "speaker": "SPEAKER_01", "text": "Dritter Satz. Vierter Satz."},
@@ -140,17 +152,6 @@ class TestMainWindowEditing(unittest.TestCase):
         self.win.toggle_smooth_column()
         self.assertFalse(self.win.table.isColumnHidden(COL_SMOOTH))
         self.assertTrue(self.win.act_toggle_smooth_col.isChecked())
-
-    def test_zoom_scales_toolbar_and_menubar(self):
-        self.win.set_zoom(100)
-        menu_pt_100 = self.win.menuBar().font().pointSizeF()
-        tb_pt_100 = self.win.tb.font().pointSizeF()
-        icon_sz_100 = self.win.tb.iconSize().width()
-
-        self.win.set_zoom(150)
-        self.assertGreater(self.win.menuBar().font().pointSizeF(), menu_pt_100)
-        self.assertGreater(self.win.tb.font().pointSizeF(), tb_pt_100)
-        self.assertGreater(self.win.tb.iconSize().width(), icon_sz_100)
 
     def test_word_count_status_and_dialog(self):
         from main import WordCountDialog
@@ -297,13 +298,63 @@ class TestMainWindowEditing(unittest.TestCase):
         base_pt = self.win.table.font().pointSizeF()
         self.assertGreater(base_pt, 12.0)
 
-        # Chrome font clamped so controls stay visible
-        self.assertLessEqual(self.win.tb.font().pointSizeF(), 14.0)
-        self.assertLessEqual(self.win.tb.iconSize().width(), 20)
+        # Toolbar is not scaled with the transcript zoom
+        self.assertLess(self.win.tb.font().pointSizeF(), base_pt)
 
         # Reset zoom
         self.win.zoom_reset()
         self.assertEqual(self.win.zoom_level, 100)
+
+    def test_undo_restores_structural_edits(self):
+        self.assertFalse(self.win.act_undo.isEnabled())
+        self.win.merge_with_prev(1)
+        self.win.split_paragraph_at_cursor(0, 12)
+        self.assertTrue(self.win.act_undo.isEnabled())
+        self.win.undo()  # Teilen zurück
+        self.assertEqual(self.win.table.rowCount(), 1)
+        self.win.undo()  # Zusammenführen zurück
+        self.assertEqual(self.win.table.rowCount(), 2)
+        self.assertEqual(self.win.table.item(1, COL_TEXT).text(), "Dritter Satz. Vierter Satz.")
+        self.assertEqual(self.win._names()["SPEAKER_01"], "Person B")
+        self.assertFalse(self.win.act_undo.isEnabled())
+
+    def test_undo_speaker_change_keeps_names(self):
+        combo = self.win.table.cellWidget(0, COL_SPEAKER)
+        combo.setCurrentIndex(1)  # Absatz 0 -> Person B
+        self.win.name_edits["SPEAKER_00"].setText("Frau Müller")
+        self.win.undo()
+        self.assertEqual(self.win.table.cellWidget(0, COL_SPEAKER).currentData(), "SPEAKER_00")
+        self.assertEqual(self.win._names()["SPEAKER_00"], "Frau Müller")  # Namen bleiben
+
+    def test_speakers_without_paragraph_are_kept(self):
+        self.win.merge_with_prev(1)  # danach hat SPEAKER_01 keinen Absatz mehr
+        self.win.split_paragraph_at_cursor(0, 12)
+        self.win.undo()
+        self.assertIn("SPEAKER_01", self.win.name_edits)
+
+    def test_change_all_only_touches_flagged_words(self):
+        from main import SpellCheckReviewDialog
+        self.win.table.item(0, COL_TEXT).setText("Hier ist dast falsch.")
+        self.win.table.item(1, COL_TEXT).setText("Er blieb dastehen und dast.")
+        dlg = SpellCheckReviewDialog(self.win, self.win.checker)
+        dlg._step_to_next_issue(0, 0)
+        self.assertEqual(dlg._current_issue.matched_text, "dast")
+        dlg.edit_replacement.setText("das")
+        dlg.change_all()
+        self.assertEqual(self.win.table.item(0, COL_TEXT).text(), "Hier ist das falsch.")
+        self.assertEqual(self.win.table.item(1, COL_TEXT).text(), "Er blieb dastehen und das.")
+        dlg.close()
+        self.win.undo()  # „Alle ändern“ ist ein Schritt
+        self.assertEqual(self.win.table.item(1, COL_TEXT).text(), "Er blieb dastehen und dast.")
+
+    def test_llm_status_is_text_not_only_color(self):
+        self.win._show_llm_status("qwen3:8b", False, "Ollama nicht erreichbar")
+        self.assertIn("nicht bereit", self.win.llm_button.text())
+        self.win._show_llm_status("qwen3:8b", True, "bereit")
+        self.assertTrue(self.win.llm_button.text().endswith("bereit"))
+
+    def test_settings_isolated_from_real_registry(self):
+        self.assertEqual(self.win.settings.format(), QSettings.Format.IniFormat)
 
 
 if __name__ == "__main__":

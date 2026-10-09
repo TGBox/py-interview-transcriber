@@ -1,6 +1,6 @@
 [project]
 name = "py-interview-transcriber"
-version = "2.3.2"
+version = "2.4.0"
 description = "A python app to process audio recordings of interviews and create nicely formatted interview transcripts."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -12,6 +12,7 @@ dependencies = [
     "pyside6>=6.8",
     "python-docx>=1.1",
     "av<19",
+    "pyenchant>=3.2",
 ]
 
 [dependency-groups]

@@ -1,0 +1,7 @@
+Hier gehören die Hunspell-Dateien des deutschen Wörterbuchs hin:
+
+  de_DE.aff  (Download: https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.aff)
+  de_DE.dic  (Download: https://raw.githubusercontent.com/LibreOffice/dictionaries/master/de/de_DE_frami.dic)
+
+Beim Speichern umbenennen (de_DE_frami.* -> de_DE.*). Die App findet sie über ENCHANT_CONFIG_DIR=<Projekt>/dict.
+Ohne diese Dateien prüft die App nur die Zeichensetzung.
