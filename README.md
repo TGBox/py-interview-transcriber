@@ -35,7 +35,9 @@ automatisch gespeichert.
    - **Satzgrenzen korrigieren:** **Strg+Umschalt+Auf** übergibt den ersten Satz an die Zeile davor, **Strg+Umschalt+Ab** den letzten Satz an die Zeile danach.
    - **Automatisch glätten:** *Bearbeiten → Sprechergrenzen automatisch glätten* korrigiert verschobene Satzanfänge/-enden über das gesamte Transkript.
    - **Zoom & Lesbarkeit:** **Strg++** vergrößert die Tabelle und Eingabefelder, **Strg+-** verkleinert, **Strg+0** setzt auf 100% zurück. Alternativ **Strg + Mausrad** oder Klick auf die Prozentanzeige in der Statusleiste.
-   - **Rechtsklick:** Kontextmenü zum Teilen, Zusammenführen und Löschen von Absätzen. **F11** schaltet den Vollbildmodus um, **Strg+D** wechselt zwischen hellem und dunklem Design.
+   - **Rechtschreibung & Zeichensetzung (wie in Word):** Rote Wellenlinien markieren Rechtschreibfehler, blaue Wellenlinien Zeichensetzungs- und Grammatikfehler. Mit **F7** oder *Überprüfen → Rechtschreibung und Zeichensetzung …* öffnet sich der Überprüfungsdialog zum schrittweisen Korrigieren mit Vorschlägen, Ignorieren oder Hinzufügen zum Wörterbuch. Rechtsklick auf eine Zelle bietet Sofortvorschläge.
+   - **Wörter zählen & Textstatistik:** **Strg+Umschalt+C** oder Klick auf die Wortanzahl in der Statusleiste öffnet die detaillierte Statistik (Zeichen mit/ohne Leerzeichen, Wörter, Absätze, Sätze und Aufschlüsselung nach Sprechern).
+   - **Rechtsklick:** Kontextmenü zum Teilen, Zusammenführen und Löschen von Absätzen sowie Rechtschreibkorrekturen. **F11** schaltet den Vollbildmodus um, **Strg+D** wechselt zwischen hellem und dunklem Design.
 4. Optional **Mit Sprachmodell glätten** (Strg+G): füllt die Spalte *Geglättet (Sprachmodell)* Absatz für Absatz.
    Abbrechen jederzeit möglich, ein erneuter Klick setzt bei den leeren Absätzen fort; zum Neu-Glätten Zelle leeren.
    **Gelb markierte** Absätze weichen in der Länge stark vom Original ab – dort hat das Modell vermutlich gekürzt

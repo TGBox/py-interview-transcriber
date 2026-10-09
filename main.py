@@ -6,15 +6,23 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QMarginsF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QKeySequence, QPageLayout, QPageSize, QPalette, QPdfWriter, QTextDocument
+from PySide6.QtGui import (
+    QAction, QColor, QFont, QKeySequence, QPageLayout, QPageSize, QPalette, QPdfWriter,
+    QPainter, QPainterPath, QPen, QTextCursor, QTextDocument, QTextLayout, QTextOption,
+)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
-    QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
+    QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
+    QVBoxLayout, QWidget,
 )
 
 import llm
+import spellcheck
+from spellcheck import Issue, SpellChecker
+import text_stats
+from text_stats import TextStatsResult, compute_statistics
 from core import FORMS, fmt_time, realign_paragraph_boundaries, render, speaker_display_name, split_first_sentence, split_last_sentence, summary_blocks, to_docx, to_html
 
 OPEN_FILTER = ("Audio, Video oder Projekt (*.mp3 *.wav *.m4a *.ogg *.flac *.aac *.wma *.mp4 *.mkv *.webm *.json);;"
@@ -94,6 +102,29 @@ QMenu {
 QMenu::item:selected {
     background-color: #0e639c;
 }
+QListWidget {
+    background-color: #1e1e1e;
+    color: #e0e0e0;
+    border: 1px solid #3f3f46;
+    border-radius: 3px;
+}
+QListWidget::item:selected {
+    background-color: #0e639c;
+    color: #ffffff;
+}
+QGroupBox {
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 10px;
+    color: #e0e0e0;
+    font-weight: bold;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
+}
 """
 
 LIGHT_STYLESHEET = """
@@ -164,6 +195,29 @@ QMenu {
 }
 QMenu::item:selected {
     background-color: #e2e8f0;
+}
+QListWidget {
+    background-color: #ffffff;
+    color: #1e293b;
+    border: 1px solid #cbd5e1;
+    border-radius: 3px;
+}
+QListWidget::item:selected {
+    background-color: #0e639c;
+    color: #ffffff;
+}
+QGroupBox {
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    margin-top: 8px;
+    padding-top: 10px;
+    color: #1e293b;
+    font-weight: bold;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
 }
 """
 
@@ -297,6 +351,10 @@ class StatusWorker(QThread):
 class ParagraphEditor(QPlainTextEdit):
     split_requested = Signal(int)
 
+    def __init__(self, parent=None, checker: SpellChecker | None = None):
+        super().__init__(parent)
+        self.checker = checker
+
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
             self.split_requested.emit(self.textCursor().position())
@@ -304,13 +362,62 @@ class ParagraphEditor(QPlainTextEdit):
             return
         super().keyPressEvent(event)
 
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+        if self.checker:
+            cursor = self.cursorForPosition(event.pos())
+            pos = cursor.position()
+            text = self.toPlainText()
+            issues = self.checker.check_text(text)
+            relevant_issue = None
+            for iss in issues:
+                if iss.start <= pos <= iss.end or (iss.start <= pos + 1 and iss.end >= pos - 1):
+                    relevant_issue = iss
+                    break
+
+            if relevant_issue:
+                spell_menu = QMenu("Rechtschreibung & Zeichensetzung", self)
+                if relevant_issue.suggestions:
+                    for sugg in relevant_issue.suggestions[:4]:
+                        act = spell_menu.addAction(f"✓ Ersetzen durch: „{sugg}“")
+                        act.triggered.connect(lambda _, s=sugg, start=relevant_issue.start, end=relevant_issue.end: self._apply_fix(start, end, s))
+                else:
+                    act_none = spell_menu.addAction("Keine Vorschläge verfügbar")
+                    act_none.setEnabled(False)
+
+                spell_menu.addSeparator()
+                act_ignore = spell_menu.addAction("Einmal ignorieren")
+                act_ignore.triggered.connect(lambda _, w=relevant_issue.matched_text: self.checker.ignore_word(w))
+                if relevant_issue.category == "spelling":
+                    act_add = spell_menu.addAction(f"„{relevant_issue.matched_text}“ zum Wörterbuch hinzufügen")
+                    parent_win = self.window()
+                    if hasattr(parent_win, "add_user_word"):
+                        act_add.triggered.connect(lambda _, w=relevant_issue.matched_text: parent_win.add_user_word(w))
+                    else:
+                        act_add.triggered.connect(lambda _, w=relevant_issue.matched_text: self.checker.add_user_word(w))
+
+                actions = menu.actions()
+                first_act = actions[0] if actions else None
+                menu.insertMenu(first_act, spell_menu)
+                menu.insertSeparator(first_act)
+
+        menu.exec(event.globalPos())
+
+    def _apply_fix(self, start: int, end: int, replacement: str):
+        tc = self.textCursor()
+        tc.setPosition(start)
+        tc.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        tc.insertText(replacement)
+        self.setTextCursor(tc)
+
 
 class MultilineDelegate(QStyledItemDelegate):
     """Lange Absätze mehrzeilig bearbeiten; Strg+Enter teilt den Absatz an der Cursorposition."""
     split_at = Signal(int, int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, checker: SpellChecker | None = None):
         super().__init__(parent)
+        self.checker = checker
         self.scale = 1.0
 
     def sizeHint(self, option, index):
@@ -320,7 +427,7 @@ class MultilineDelegate(QStyledItemDelegate):
         return QSize(size.width(), size.height() + pad)
 
     def createEditor(self, parent, option, index):
-        editor = ParagraphEditor(parent)
+        editor = ParagraphEditor(parent, checker=self.checker)
         editor.setFont(parent.font())
         row = index.row()
 
@@ -337,6 +444,411 @@ class MultilineDelegate(QStyledItemDelegate):
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.toPlainText().strip())
+
+
+class SpellCheckDelegate(MultilineDelegate):
+    """Zeichnet rote Wellenlinien (Rechtschreibung) und blaue Wellenlinien (Zeichensetzung) wie in Microsoft Word."""
+    def __init__(self, parent=None, checker: SpellChecker | None = None):
+        super().__init__(parent, checker=checker)
+        self.enabled = True
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        if not self.enabled or not self.checker:
+            return
+        text = index.data() or ""
+        if not text:
+            return
+        issues = self.checker.check_text(text)
+        if not issues:
+            return
+
+        margin_x = 4
+        margin_y = 4
+        avail_width = max(10, option.rect.width() - margin_x * 2)
+
+        layout = QTextLayout(text, option.font)
+        opt = QTextOption(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        opt.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(opt)
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(avail_width)
+        layout.endLayout()
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        for issue in issues:
+            col = QColor("#e53935") if issue.category == "spelling" else QColor("#1e88e5")
+            pen = QPen(col)
+            pen.setWidthF(1.2 * self.scale)
+            painter.setPen(pen)
+
+            for i in range(layout.lineCount()):
+                line = layout.lineAt(i)
+                l_start = line.textStart()
+                l_end = l_start + line.textLength()
+                if issue.end <= l_start or issue.start >= l_end:
+                    continue
+
+                span_start = max(issue.start, l_start)
+                span_end = min(issue.end, l_end)
+                x1, _ = line.cursorToX(span_start)
+                x2, _ = line.cursorToX(span_end)
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if abs(x2 - x1) < 2.0:
+                    x2 = x1 + 6.0 * self.scale
+
+                abs_x1 = option.rect.left() + margin_x + x1
+                abs_x2 = option.rect.left() + margin_x + x2
+                base_y = option.rect.top() + margin_y + line.position().y() + line.height() - 1
+
+                wave_path = QPainterPath()
+                wave_path.moveTo(abs_x1, base_y)
+                step = 3.2 * self.scale
+                amp = 1.2 * self.scale
+                curr = abs_x1
+                up = True
+                while curr < abs_x2:
+                    curr = min(abs_x2, curr + step)
+                    y_val = base_y - amp if up else base_y + amp
+                    wave_path.lineTo(curr, y_val)
+                    up = not up
+                painter.drawPath(wave_path)
+
+        painter.restore()
+
+
+class WordCountDialog(QDialog):
+    """Statistik-Dialog für Zeichen, Wörter, Absätze und Sätze (wie in Microsoft Word)."""
+    def __init__(self, parent, stats: TextStatsResult):
+        super().__init__(parent)
+        self.setWindowTitle("Wörter zählen")
+        self.setMinimumWidth(480)
+        v = QVBoxLayout(self)
+
+        lbl_header = QLabel("<h3>Textstatistik</h3>")
+        v.addWidget(lbl_header)
+
+        gb_doc = QGroupBox("Gesamtes Transkript")
+        f_doc = QFormLayout(gb_doc)
+        f_doc.addRow("Wörter:", QLabel(f"<b>{stats.total.words:,}</b>".replace(",", ".")))
+        f_doc.addRow("Zeichen (ohne Leerzeichen):", QLabel(f"{stats.total.characters_no_spaces:,}".replace(",", ".")))
+        f_doc.addRow("Zeichen (mit Leerzeichen):", QLabel(f"{stats.total.characters_with_spaces:,}".replace(",", ".")))
+        f_doc.addRow("Absätze:", QLabel(f"{stats.total.paragraphs:,}".replace(",", ".")))
+        f_doc.addRow("Sätze:", QLabel(f"{stats.total.sentences:,}".replace(",", ".")))
+        f_doc.addRow("Durchschnittl. Wörter pro Satz:", QLabel(f"{stats.total.average_words_per_sentence}"))
+        v.addWidget(gb_doc)
+
+        if stats.selection:
+            gb_sel = QGroupBox("Aktueller Absatz")
+            f_sel = QFormLayout(gb_sel)
+            f_sel.addRow("Wörter:", QLabel(f"<b>{stats.selection.words:,}</b>".replace(",", ".")))
+            f_sel.addRow("Zeichen (ohne Leerzeichen):", QLabel(f"{stats.selection.characters_no_spaces:,}".replace(",", ".")))
+            f_sel.addRow("Zeichen (mit Leerzeichen):", QLabel(f"{stats.selection.characters_with_spaces:,}".replace(",", ".")))
+            f_sel.addRow("Sätze:", QLabel(f"{stats.selection.sentences:,}".replace(",", ".")))
+            v.addWidget(gb_sel)
+
+        if stats.speakers:
+            gb_spk = QGroupBox("Aufschlüsselung nach Sprechern")
+            v_spk = QVBoxLayout(gb_spk)
+            tbl_spk = QTableWidget(len(stats.speakers), 4)
+            tbl_spk.setHorizontalHeaderLabels(["Sprecher", "Wörter", "Anteil", "Absätze"])
+            tbl_spk.verticalHeader().hide()
+            tbl_spk.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            tbl_spk.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            for r, spk in enumerate(stats.speakers):
+                tbl_spk.setItem(r, 0, QTableWidgetItem(spk.display_name))
+                tbl_spk.setItem(r, 1, QTableWidgetItem(f"{spk.words:,}".replace(",", ".")))
+                tbl_spk.setItem(r, 2, QTableWidgetItem(f"{spk.word_share_pct} %"))
+                tbl_spk.setItem(r, 3, QTableWidgetItem(str(spk.paragraphs)))
+            tbl_spk.setMaximumHeight(140)
+            v_spk.addWidget(tbl_spk)
+            v.addWidget(gb_spk)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        v.addWidget(buttons)
+
+
+class UserDictionaryDialog(QDialog):
+    """Dialog zur Verwaltung des Benutzerwörterbuchs."""
+    def __init__(self, parent, checker: SpellChecker, on_changed=None):
+        super().__init__(parent)
+        self.checker = checker
+        self.on_changed = on_changed
+        self.setWindowTitle("Benutzerwörterbuch bearbeiten")
+        self.setMinimumSize(420, 360)
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("Wörter im Benutzerwörterbuch werden bei der Rechtschreibprüfung nicht als Fehler markiert."))
+
+        self.list_widget = QListWidget()
+        self.list_widget.addItems(sorted(self.checker.get_user_words()))
+        v.addWidget(self.list_widget, 1)
+
+        h_add = QHBoxLayout()
+        self.edit_new = QLineEdit()
+        self.edit_new.setPlaceholderText("Neues Wort eingeben …")
+        btn_add = QPushButton("Hinzufügen")
+        btn_add.clicked.connect(self._add_word)
+        self.edit_new.returnPressed.connect(self._add_word)
+        h_add.addWidget(self.edit_new, 1)
+        h_add.addWidget(btn_add)
+        v.addLayout(h_add)
+
+        h_bottom = QHBoxLayout()
+        btn_del = QPushButton("Ausgewähltes löschen")
+        btn_del.clicked.connect(self._remove_word)
+        h_bottom.addWidget(btn_del)
+        h_bottom.addStretch()
+
+        btn_close = QPushButton("Schließen")
+        btn_close.clicked.connect(self.accept)
+        h_bottom.addWidget(btn_close)
+        v.addLayout(h_bottom)
+
+    def _add_word(self):
+        w = self.edit_new.text().strip()
+        if w and w not in self.checker.get_user_words():
+            self.checker.add_user_word(w)
+            self.list_widget.addItem(w)
+            self.edit_new.clear()
+            if self.on_changed:
+                self.on_changed()
+
+    def _remove_word(self):
+        item = self.list_widget.currentItem()
+        if item:
+            w = item.text()
+            self.checker.remove_user_word(w)
+            self.list_widget.takeItem(self.list_widget.row(item))
+            if self.on_changed:
+                self.on_changed()
+
+
+class SpellCheckReviewDialog(QDialog):
+    """Word-ähnlicher Dialog zur schrittweisen Überprüfung von Rechtschreibung und Zeichensetzung (F7)."""
+    def __init__(self, parent: "MainWindow", checker: SpellChecker):
+        super().__init__(parent)
+        self.main_win = parent
+        self.checker = checker
+        self.setWindowTitle("Rechtschreibung und Zeichensetzung")
+        self.resize(620, 440)
+
+        self._current_row = -1
+        self._current_issue_index = -1
+        self._current_issue: Issue | None = None
+
+        v = QVBoxLayout(self)
+
+        # Header info
+        header_row = QHBoxLayout()
+        self.lbl_category = QLabel()
+        self.lbl_category.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        self.lbl_progress = QLabel()
+        self.lbl_progress.setStyleSheet("color: #888888; font-size: 9pt;")
+        header_row.addWidget(self.lbl_category, 1)
+        header_row.addWidget(self.lbl_progress)
+        v.addLayout(header_row)
+
+        self.lbl_message = QLabel()
+        self.lbl_message.setWordWrap(True)
+        self.lbl_message.setStyleSheet("margin-top: 2px; margin-bottom: 6px; font-size: 10pt;")
+        v.addWidget(self.lbl_message)
+
+        v.addWidget(QLabel("<b>Im Kontext:</b>"))
+        self.context_box = QLabel()
+        self.context_box.setWordWrap(True)
+        self.context_box.setStyleSheet(
+            "background-color: palette(base); border: 1px solid palette(mid); border-radius: 4px; padding: 10px; font-size: 10.5pt; color: palette(text);"
+        )
+        self.context_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        v.addWidget(self.context_box)
+
+        mid = QHBoxLayout()
+        left_box = QVBoxLayout()
+        left_box.addWidget(QLabel("<b>Vorschläge:</b>"))
+        self.suggestions_list = QListWidget()
+        self.suggestions_list.itemDoubleClicked.connect(self.change_current)
+        self.suggestions_list.itemSelectionChanged.connect(self._on_suggestion_selected)
+        left_box.addWidget(self.suggestions_list, 1)
+
+        left_box.addWidget(QLabel("<b>Ändern in:</b>"))
+        self.edit_replacement = QLineEdit()
+        left_box.addWidget(self.edit_replacement)
+        mid.addLayout(left_box, 1)
+
+        btn_box = QVBoxLayout()
+        self.btn_ignore = QPushButton("Einmal &ignorieren")
+        self.btn_ignore.clicked.connect(self.ignore_once)
+        btn_box.addWidget(self.btn_ignore)
+
+        self.btn_ignore_all = QPushButton("Alle i&gnorieren")
+        self.btn_ignore_all.clicked.connect(self.ignore_all)
+        btn_box.addWidget(self.btn_ignore_all)
+
+        self.btn_change = QPushButton("&Ändern")
+        self.btn_change.setDefault(True)
+        self.btn_change.clicked.connect(self.change_current)
+        btn_box.addWidget(self.btn_change)
+
+        self.btn_change_all = QPushButton("A&lle ändern")
+        self.btn_change_all.clicked.connect(self.change_all)
+        btn_box.addWidget(self.btn_change_all)
+
+        self.btn_add_dict = QPushButton("Zum &Wörterbuch hinzufügen")
+        self.btn_add_dict.clicked.connect(self.add_to_dictionary)
+        btn_box.addWidget(self.btn_add_dict)
+
+        btn_box.addStretch()
+
+        self.btn_close = QPushButton("Schließen")
+        self.btn_close.clicked.connect(self.accept)
+        btn_box.addWidget(self.btn_close)
+
+        mid.addLayout(btn_box)
+        v.addLayout(mid, 1)
+
+        start_row = self.main_win.table.currentRow()
+        if start_row < 0:
+            start_row = 0
+        QTimer.singleShot(0, lambda: self._step_to_next_issue(start_row, 0))
+
+    def _step_to_next_issue(self, from_row: int, from_issue_idx: int):
+        total_rows = self.main_win.table.rowCount()
+        if total_rows == 0:
+            self._finish_review()
+            return
+
+        # Check forward from from_row
+        for r in range(from_row, total_rows):
+            item = self.main_win.table.item(r, COL_TEXT)
+            text = item.text() if item else ""
+            issues = self.checker.check_text(text)
+            start_idx = from_issue_idx if r == from_row else 0
+            if issues and start_idx < len(issues):
+                self._display_issue(r, start_idx, issues[start_idx], len(issues))
+                return
+
+        # Wrap around from 0 to from_row - 1
+        for r in range(0, from_row):
+            item = self.main_win.table.item(r, COL_TEXT)
+            text = item.text() if item else ""
+            issues = self.checker.check_text(text)
+            if issues:
+                self._display_issue(r, 0, issues[0], len(issues))
+                return
+
+        self._finish_review()
+
+    def _display_issue(self, row: int, issue_idx: int, issue: Issue, total_row_issues: int):
+        self._current_row = row
+        self._current_issue_index = issue_idx
+        self._current_issue = issue
+
+        # Highlight cell in main window
+        self.main_win.table.setCurrentCell(row, COL_TEXT)
+        self.main_win.table.scrollToItem(self.main_win.table.item(row, COL_TEXT))
+
+        # Category badge & styling
+        is_spelling = issue.category == "spelling"
+        badge_text = "🔴 Rechtschreibung" if is_spelling else "🔵 Zeichensetzung"
+        badge_color = "#c62828" if is_spelling else "#1565c0"
+        self.lbl_category.setText(f"<span style='color: {badge_color};'>{badge_text}</span>")
+        self.lbl_progress.setText(f"Absatz {row + 1} von {self.main_win.table.rowCount()}")
+
+        self.lbl_message.setText(issue.message)
+
+        # Context markup
+        text = self.main_win.table.item(row, COL_TEXT).text()
+        before = text[max(0, issue.start - 40):issue.start]
+        matched = text[issue.start:issue.end]
+        after = text[issue.end:min(len(text), issue.end + 40)]
+        highlight_bg = "#ffebee" if is_spelling else "#e3f2fd"
+        highlight_fg = "#b71c1c" if is_spelling else "#0d47a1"
+        escaped_before = before.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        escaped_matched = matched.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        escaped_after = after.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        prefix = "… " if issue.start > 40 else ""
+        suffix = " …" if len(text) > issue.end + 40 else ""
+        self.context_box.setText(
+            f"{prefix}{escaped_before}"
+            f"<span style='background-color: {highlight_bg}; color: {highlight_fg}; font-weight: bold; border-radius: 2px; padding: 1px 3px; border-bottom: 2px solid {highlight_fg};'>{escaped_matched}</span>"
+            f"{escaped_after}{suffix}"
+        )
+
+        # Suggestions
+        self.suggestions_list.clear()
+        for sugg in issue.suggestions:
+            self.suggestions_list.addItem(sugg)
+
+        if issue.suggestions:
+            self.suggestions_list.setCurrentRow(0)
+            self.edit_replacement.setText(issue.suggestions[0])
+        else:
+            self.edit_replacement.setText(issue.matched_text)
+
+        self.btn_add_dict.setEnabled(is_spelling)
+
+    def _on_suggestion_selected(self):
+        item = self.suggestions_list.currentItem()
+        if item:
+            self.edit_replacement.setText(item.text())
+
+    def ignore_once(self):
+        if self._current_row >= 0:
+            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+
+    def ignore_all(self):
+        if self._current_issue:
+            self.checker.ignore_word(self._current_issue.matched_text)
+            self.main_win.table.viewport().update()
+            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+
+    def change_current(self):
+        if self._current_row < 0 or not self._current_issue:
+            return
+        repl = self.edit_replacement.text()
+        item = self.main_win.table.item(self._current_row, COL_TEXT)
+        if not item:
+            return
+        text = item.text()
+        iss = self._current_issue
+        new_text = text[:iss.start] + repl + text[iss.end:]
+        item.setText(new_text)  # triggers itemChanged -> _mark_dirty & updates
+        self._step_to_next_issue(self._current_row, 0)
+
+    def change_all(self):
+        if self._current_row < 0 or not self._current_issue:
+            return
+        repl = self.edit_replacement.text()
+        target = self._current_issue.matched_text
+        for r in range(self.main_win.table.rowCount()):
+            item = self.main_win.table.item(r, COL_TEXT)
+            if item and target in item.text():
+                pattern = re.compile(re.escape(target))
+                item.setText(pattern.sub(repl, item.text()))
+        self._step_to_next_issue(self._current_row, 0)
+
+    def add_to_dictionary(self):
+        if self._current_issue:
+            self.main_win.add_user_word(self._current_issue.matched_text)
+            self._step_to_next_issue(self._current_row, self._current_issue_index + 1)
+
+    def _finish_review(self):
+        QMessageBox.information(
+            self,
+            "Überprüfung abgeschlossen",
+            "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen.",
+        )
+        self.accept()
 
 
 class SplitDialog(QDialog):
@@ -491,6 +1003,10 @@ class MainWindow(QMainWindow):
         self.name_edits: dict[str, QLineEdit] = {}
         self.dirty = False
 
+        # Rechtschreibung und Wörterbuch
+        self.checker = SpellChecker(user_words=self.settings.value("user_dictionary", []))
+        self.spellcheck_enabled = self.settings.value("spellcheck_enabled", True, type=bool)
+
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(QAudioOutput(self))
         self.player.playbackStateChanged.connect(self._update_play_text)
@@ -503,6 +1019,15 @@ class MainWindow(QMainWindow):
         self.act_pdf = self._act("PDF …", lambda: self.export("pdf"), "Ctrl+Shift+E")
         self.act_cancel = self._act("Abbrechen", self.cancel)  # bewusst ohne Esc: würde beim Zelleditieren stundenlange Läufe abbrechen
         self.act_replace = self._act("Suchen und Ersetzen …", self.replace_all, "Ctrl+H")
+        self.act_word_count = self._act("Wörter zählen …", self.open_word_count, "Ctrl+Shift+C")
+        self.act_word_count.setToolTip("Zeichen, Wörter, Absätze und Sätze zählen (wie in Microsoft Word).")
+        self.act_spellcheck = self._act("Rechtschreibung und Zeichensetzung …", self.spellcheck_review, "F7")
+        self.act_spellcheck.setToolTip("Überprüft Rechtschreibung und Zeichensetzung Schritt für Schritt (wie F7 in Word).")
+        self.act_toggle_spellcheck = self._act("Rechtschreibprüfung anzeigen", self.toggle_spellcheck)
+        self.act_toggle_spellcheck.setCheckable(True)
+        self.act_toggle_spellcheck.setChecked(self.spellcheck_enabled)
+        self.act_toggle_spellcheck.setToolTip("Schaltet rote und blaue Wellenlinien für Fehler ein oder aus.")
+        self.act_user_dict = self._act("Benutzerwörterbuch bearbeiten …", self.open_user_dictionary)
         self.act_smooth = self._act("Mit Sprachmodell glätten", self.smooth_with_llm, "Ctrl+G")
         self.act_smooth.setToolTip("Füllt die Spalte „Geglättet (Sprachmodell)“ für alle noch leeren Absätze.")
         self.act_realign = self._act("Sprechergrenzen automatisch glätten", self.auto_realign_speakers)
@@ -526,24 +1051,35 @@ class MainWindow(QMainWindow):
         self.act_zoom_out.setShortcuts([QKeySequence.StandardKey.ZoomOut, QKeySequence("Ctrl+-")])
         self.act_zoom_reset = self._act("Standardgröße (100%)", self.zoom_reset, "Ctrl+0")
 
-        # Menü für Seltenes
+        # Menüs
         m = self.menuBar().addMenu("&Datei")
         for a in (self.act_open, self.act_save, self.act_docx, self.act_pdf):
             m.addAction(a)
         m_edit = self.menuBar().addMenu("&Bearbeiten")
         m_edit.addAction(self.act_replace)
+        m_edit.addAction(self.act_spellcheck)
+        m_edit.addAction(self.act_word_count)
         m_edit.addAction(self.act_smooth)
         m_edit.addAction(self.act_toggle_smooth_col)
         m_edit.addSeparator()
         m_edit.addAction(self.act_realign)
         m_edit.addAction(self.act_first_to_prev)
         m_edit.addAction(self.act_last_to_next)
+
+        m_review = self.menuBar().addMenu("&Überprüfen")
+        m_review.addAction(self.act_spellcheck)
+        m_review.addAction(self.act_word_count)
+        m_review.addSeparator()
+        m_review.addAction(self.act_toggle_spellcheck)
+        m_review.addAction(self.act_user_dict)
+
         m_view = self.menuBar().addMenu("&Ansicht")
         m_view.addAction(self.act_zoom_in)
         m_view.addAction(self.act_zoom_out)
         m_view.addAction(self.act_zoom_reset)
         m_view.addSeparator()
         m_view.addAction(self.act_toggle_smooth_col)
+        m_view.addAction(self.act_toggle_spellcheck)
         m_view.addAction(self.act_dark_mode)
         m_view.addAction(self.act_fullscreen)
         self.menuBar().addMenu("&Einstellungen").addAction(self._act("Einstellungen …", self.open_settings, "Ctrl+,"))
@@ -568,9 +1104,11 @@ class MainWindow(QMainWindow):
         self.hotwords.setPlaceholderText("z. B. Namen, Produkte, Abkürzungen")
         self.hotwords.setToolTip("Begriffe, die Whisper richtig schreiben soll (Leerzeichen-getrennt).")
         self.hotwords.editingFinished.connect(lambda: self.settings.setValue("hotwords", self.hotwords.text()))
+        self.hotwords.editingFinished.connect(self._update_spellcheck_project_words)
         self.tb.addWidget(self.hotwords)
         self.tb.addSeparator()
         self.tb.addAction(self.act_play)
+        self.tb.addAction(self.act_spellcheck)
         self.tb.addAction(self.act_smooth)
         self.tb.addAction(self.act_toggle_smooth_col)
         self.tb.addSeparator()
@@ -612,10 +1150,12 @@ class MainWindow(QMainWindow):
         h.setSectionResizeMode(COL_SPEAKER, QHeaderView.ResizeMode.ResizeToContents)
         h.setSectionResizeMode(COL_TEXT, QHeaderView.ResizeMode.Stretch)
         h.setSectionResizeMode(COL_SMOOTH, QHeaderView.ResizeMode.Stretch)
-        self.text_delegate = MultilineDelegate(self.table)
+        self.text_delegate = SpellCheckDelegate(self.table, checker=self.checker)
+        self.text_delegate.enabled = self.spellcheck_enabled
         self.text_delegate.split_at.connect(self.split_paragraph_at_cursor)
         self.table.setItemDelegateForColumn(COL_TEXT, self.text_delegate)
-        self.smooth_delegate = MultilineDelegate(self.table)
+        self.smooth_delegate = SpellCheckDelegate(self.table, checker=self.checker)
+        self.smooth_delegate.enabled = self.spellcheck_enabled
         self.table.setItemDelegateForColumn(COL_SMOOTH, self.smooth_delegate)
         self.table.setColumnHidden(COL_SMOOTH, True)
         self.table.itemChanged.connect(self._on_item_changed)
@@ -623,12 +1163,16 @@ class MainWindow(QMainWindow):
         self.table.addAction(self.act_first_to_prev)
         self.table.addAction(self.act_last_to_next)
         self.table.addAction(self.act_toggle_smooth_col)
+        self.table.addAction(self.act_spellcheck)
+        self.table.addAction(self.act_word_count)
         self.table.addAction(self.act_zoom_in)
         self.table.addAction(self.act_zoom_out)
         self.table.addAction(self.act_zoom_reset)
         self.table.viewport().installEventFilter(self)
         self.addAction(self.act_fullscreen)
         self.addAction(self.act_toggle_smooth_col)
+        self.addAction(self.act_spellcheck)
+        self.addAction(self.act_word_count)
         self.addAction(self.act_zoom_in)
         self.addAction(self.act_zoom_out)
         self.addAction(self.act_zoom_reset)
@@ -645,6 +1189,21 @@ class MainWindow(QMainWindow):
         self.bar.setVisible(False)
         self.statusBar().addWidget(self.status, 1)
         self.statusBar().addPermanentWidget(self.bar)
+
+        self.stats_button = QToolButton()
+        self.stats_button.setAutoRaise(True)
+        self.stats_button.setToolTip("Wörter zählen & Textstatistik (Strg+Umschalt+C).\nKlicken zum Öffnen des Statistikdialogs.")
+        self.stats_button.clicked.connect(self.open_word_count)
+        self.stats_button.setVisible(False)
+        self.statusBar().addPermanentWidget(self.stats_button)
+
+        self.spell_button = QToolButton()
+        self.spell_button.setAutoRaise(True)
+        self.spell_button.setToolTip("Rechtschreibung und Zeichensetzung prüfen (F7).\nKlicken zum Starten der Überprüfung.")
+        self.spell_button.clicked.connect(self.spellcheck_review)
+        self.spell_button.setVisible(False)
+        self.statusBar().addPermanentWidget(self.spell_button)
+
         self.zoom_button = QToolButton()
         self.zoom_button.setAutoRaise(True)
         self.zoom_button.setToolTip("Zoomstufe der Tabelle ändern.\nKlicken zum Zurücksetzen auf 100%.\nStrg++ / Strg+- oder Strg+Mausrad.")
@@ -759,9 +1318,14 @@ class MainWindow(QMainWindow):
         if not busy and self.worker and self.worker.cancel_requested:
             self.status.setText("Abgebrochen.")
         has_rows = self.table.rowCount() > 0
-        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace, self.act_smooth,
-                  self.act_realign, self.act_first_to_prev, self.act_last_to_next):
+        for a in (self.act_save, self.act_docx, self.act_pdf, self.act_replace, self.act_spellcheck,
+                  self.act_word_count, self.act_smooth, self.act_realign, self.act_first_to_prev,
+                  self.act_last_to_next):
             a.setEnabled(not busy and has_rows)
+        if hasattr(self, "stats_button"):
+            self.stats_button.setEnabled(not busy)
+        if hasattr(self, "spell_button"):
+            self.spell_button.setEnabled(not busy)
 
     # ---------- Projekt ----------
     def save_project(self):
@@ -837,6 +1401,7 @@ class MainWindow(QMainWindow):
         self.toggle_smooth_column(any(p.get("smooth") for p in paragraphs))
         self._refresh_combos()
         self.table.resizeRowsToContents()
+        self.update_status_metrics()
 
     def _refresh_combos(self):
         names = self._names()
@@ -856,6 +1421,7 @@ class MainWindow(QMainWindow):
             self.table.blockSignals(False)
         self.table.resizeRowToContents(item.row())
         self._mark_dirty()
+        self.update_status_metrics()
 
     def _mark_suspicious(self, row: int):
         smooth = self.table.item(row, COL_SMOOTH)
@@ -896,10 +1462,12 @@ class MainWindow(QMainWindow):
                     item.setText(new)
                     total += n
         self.status.setText(f"{total} Stelle(n) ersetzt.")
+        self.update_status_metrics()
 
     def _remove_row(self, row: int):
         if 0 <= row < self.table.rowCount():
             self.table.removeRow(row)
+            self.update_status_metrics()
 
     def delete_row(self, row: int):
         if 0 <= row < self.table.rowCount():
@@ -1196,6 +1764,33 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
 
+        # Schnelle Rechtschreib- und Zeichensetzungsvorschläge für diese Zeile
+        item = self.table.item(row, COL_TEXT)
+        if item and self.spellcheck_enabled:
+            issues = self.checker.check_text(item.text())
+            if issues:
+                top_issue = issues[0]
+                m_title = "🔴 Rechtschreibung" if top_issue.category == "spelling" else "🔵 Zeichensetzung"
+                menu.addSection(f"{m_title}: „{top_issue.matched_text}“")
+                if top_issue.suggestions:
+                    for sugg in top_issue.suggestions[:3]:
+                        act_s = menu.addAction(f"✓ Korrigieren zu: „{sugg}“")
+                        act_s.triggered.connect(lambda _, s=sugg, st=top_issue.start, en=top_issue.end, r=row: self._replace_in_row(r, st, en, s))
+                act_ign = menu.addAction(f"„{top_issue.matched_text}“ ignorieren")
+                act_ign.triggered.connect(lambda _, w=top_issue.matched_text: self._ignore_word_and_refresh(w))
+                if top_issue.category == "spelling":
+                    act_add = menu.addAction(f"„{top_issue.matched_text}“ zum Wörterbuch hinzufügen")
+                    act_add.triggered.connect(lambda _, w=top_issue.matched_text: self.add_user_word(w))
+                menu.addSeparator()
+
+        act_spell = menu.addAction("Rechtschreibung und Zeichensetzung prüfen …\tF7")
+        act_spell.triggered.connect(self.spellcheck_review)
+
+        act_stats = menu.addAction("Wörter zählen …\tCtrl+Shift+C")
+        act_stats.triggered.connect(self.open_word_count)
+
+        menu.addSeparator()
+
         act_split = menu.addAction("✂ Absatz teilen …")
         act_split.setToolTip("Absatz an einer bestimmten Stelle aufteilen (auch mit Strg+Eingabe im Texteditor)")
         act_split.triggered.connect(lambda: self.split_dialog(row))
@@ -1229,6 +1824,102 @@ class MainWindow(QMainWindow):
         menu.addAction(self.act_toggle_smooth_col)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    # ---------- Rechtschreibung, Zeichensetzung & Statistik ----------
+    def _replace_in_row(self, row: int, start: int, end: int, replacement: str):
+        item = self.table.item(row, COL_TEXT)
+        if not item:
+            return
+        text = item.text()
+        new_text = text[:start] + replacement + text[end:]
+        item.setText(new_text)
+
+    def _ignore_word_and_refresh(self, word: str):
+        self.checker.ignore_word(word)
+        self.table.viewport().update()
+        self.update_status_metrics()
+
+    def open_word_count(self):
+        paras = self._paragraphs()
+        stats = compute_statistics(paras, self.table.currentRow(), self._names())
+        dlg = WordCountDialog(self, stats)
+        dlg.exec()
+
+    def spellcheck_review(self):
+        self._update_spellcheck_project_words()
+        paras = self._paragraphs()
+        if not paras:
+            QMessageBox.information(self, "Kein Transkript", "Kein Transkript zum Überprüfen geladen.")
+            return
+        issue_map = self.checker.check_paragraphs(paras)
+        total_issues = sum(len(iss) for iss in issue_map.values())
+        if total_issues == 0:
+            QMessageBox.information(
+                self,
+                "Keine Fehler gefunden",
+                "Die Rechtschreib- und Zeichensetzungsprüfung ist abgeschlossen. Es wurden keine Fehler gefunden.",
+            )
+            return
+        dlg = SpellCheckReviewDialog(self, self.checker)
+        dlg.exec()
+        self.table.viewport().update()
+        self.update_status_metrics()
+
+    def open_user_dictionary(self):
+        dlg = UserDictionaryDialog(self, self.checker, on_changed=self._on_user_dict_changed)
+        dlg.exec()
+
+    def _on_user_dict_changed(self):
+        self.settings.setValue("user_dictionary", list(self.checker.get_user_words()))
+        self.table.viewport().update()
+        self.update_status_metrics()
+
+    def add_user_word(self, word: str):
+        self.checker.add_user_word(word)
+        self.settings.setValue("user_dictionary", list(self.checker.get_user_words()))
+        self.table.viewport().update()
+        self.update_status_metrics()
+
+    def toggle_spellcheck(self, checked: bool | None = None):
+        if checked is None:
+            checked = not self.spellcheck_enabled
+        self.spellcheck_enabled = checked
+        self.settings.setValue("spellcheck_enabled", checked)
+        self.act_toggle_spellcheck.setChecked(checked)
+        self.text_delegate.enabled = checked
+        self.smooth_delegate.enabled = checked
+        self.table.viewport().update()
+        self.update_status_metrics()
+
+    def _update_spellcheck_project_words(self, *_):
+        names = list(self._names().values())
+        hw = [w for w in self.hotwords.text().split() if w.strip()]
+        self.checker.set_project_words(names + hw)
+
+    def update_status_metrics(self):
+        paras = self._paragraphs()
+        has_rows = len(paras) > 0
+        if hasattr(self, "stats_button"):
+            stats = compute_statistics(paras, self.table.currentRow(), self._names())
+            if stats.total.words > 0:
+                self.stats_button.setText(f"{stats.total.words:,} Wörter · {stats.total.paragraphs} Absätze".replace(",", "."))
+                self.stats_button.setVisible(True)
+            else:
+                self.stats_button.setText("0 Wörter")
+                self.stats_button.setVisible(has_rows)
+
+        if hasattr(self, "spell_button"):
+            self._update_spellcheck_project_words()
+            issue_map = self.checker.check_paragraphs(paras)
+            total_issues = sum(len(iss) for iss in issue_map.values())
+            ok_col, err_col = status_colors(self.settings.value("dark_mode", False, type=bool))
+            if total_issues == 0:
+                self.spell_button.setText("✓ Keine Fehler")
+                self.spell_button.setStyleSheet(f"color: {ok_col}")
+            else:
+                self.spell_button.setText(f"⚠ {total_issues} Fehler (F7)")
+                self.spell_button.setStyleSheet(f"color: {err_col}; font-weight: bold;")
+            self.spell_button.setVisible(has_rows)
 
     # ---------- Wiedergabe ----------
     def _seek_to_row(self, row, *_):

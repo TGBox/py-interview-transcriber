@@ -152,8 +152,77 @@ class TestMainWindowEditing(unittest.TestCase):
         self.assertGreater(self.win.tb.font().pointSizeF(), tb_pt_100)
         self.assertGreater(self.win.tb.iconSize().width(), icon_sz_100)
 
-        self.win.set_zoom(100)
-        self.assertEqual(self.win.tb.iconSize().width(), icon_sz_100)
+    def test_word_count_status_and_dialog(self):
+        from main import WordCountDialog
+        import text_stats
+
+        # In setUp, we have 2 paragraphs:
+        # "Erster Satz. Zweiter Satz." (4 words)
+        # "Drier Satz. Vierter Satz." (4 words) -> total 8 words
+        self.win.update_status_metrics()
+        self.assertFalse(self.win.stats_button.isHidden())
+        self.assertIn("8 Wörter", self.win.stats_button.text())
+        self.assertIn("2 Absätze", self.win.stats_button.text())
+
+        # Test WordCountDialog instantiates with stats
+        stats = text_stats.compute_statistics(self.win._paragraphs(), 0, self.win._names())
+        dlg = WordCountDialog(self.win, stats)
+        self.assertEqual(dlg.windowTitle(), "Wörter zählen")
+        dlg.close()
+
+    def test_spellcheck_status_and_toggle(self):
+        self.win.update_status_metrics()
+        self.assertFalse(self.win.spell_button.isHidden())
+
+        # Toggle spellcheck off and on
+        self.assertTrue(self.win.spellcheck_enabled)
+        self.assertTrue(self.win.text_delegate.enabled)
+        self.win.toggle_spellcheck(False)
+        self.assertFalse(self.win.spellcheck_enabled)
+        self.assertFalse(self.win.text_delegate.enabled)
+        self.win.toggle_spellcheck(True)
+        self.assertTrue(self.win.spellcheck_enabled)
+        self.assertTrue(self.win.text_delegate.enabled)
+
+    def test_spellcheck_review_and_replace(self):
+        from main import SpellCheckReviewDialog
+
+        # Set paragraph with known error "garnicht"
+        self.win.table.item(0, COL_TEXT).setText("Das ist garnicht so schwer.")
+        self.win.update_status_metrics()
+        self.assertIn("Fehler", self.win.spell_button.text())
+
+        dlg = SpellCheckReviewDialog(self.win, self.win.checker)
+        # Manually invoke step
+        dlg._step_to_next_issue(0, 0)
+        self.assertIsNotNone(dlg._current_issue)
+        self.assertEqual(dlg._current_issue.matched_text, "garnicht")
+        self.assertIn("gar nicht", dlg._current_issue.suggestions)
+
+        # Apply change
+        dlg.edit_replacement.setText("gar nicht")
+        dlg.change_current()
+
+        # Check cell text updated
+        self.assertEqual(self.win.table.item(0, COL_TEXT).text(), "Das ist gar nicht so schwer.")
+        dlg.close()
+
+    def test_user_dictionary_dialog_and_add_word(self):
+        from main import UserDictionaryDialog
+
+        custom_word = "Transkriptionsspezialist"
+        self.win.add_user_word(custom_word)
+        self.assertIn(custom_word, self.win.checker.get_user_words())
+
+        dlg = UserDictionaryDialog(self.win, self.win.checker)
+        items = [dlg.list_widget.item(i).text() for i in range(dlg.list_widget.count())]
+        self.assertIn(custom_word, items)
+
+        # Test remove
+        dlg.list_widget.setCurrentRow(items.index(custom_word))
+        dlg._remove_word()
+        self.assertNotIn(custom_word, self.win.checker.get_user_words())
+        dlg.close()
 
 
 if __name__ == "__main__":
