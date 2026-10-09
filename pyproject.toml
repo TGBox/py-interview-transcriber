@@ -1,6 +1,6 @@
 [project]
 name = "py-interview-transcriber"
-version = "2.3.1"
+version = "2.3.2"
 description = "A python app to process audio recordings of interviews and create nicely formatted interview transcripts."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
